@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glambot — Review &amp; Approve</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.1rem; margin-top: 2.5rem; color: #555; }
+  .flash { padding: .6rem 1rem; border-radius: 6px; margin-bottom: 1rem; }
+  .flash.error { background: #fdecea; color: #a4262c; }
+  .flash.info { background: #eaf6ea; color: #1a6e2a; }
+  .card { border: 1px solid #ddd; border-radius: 10px; padding: 1rem; margin-bottom: 1.5rem; }
+  .card video { width: 100%; max-height: 360px; background: #000; border-radius: 6px; }
+  .meta { color: #666; font-size: .85rem; margin: .3rem 0 1rem; }
+  label { display: block; font-weight: 600; margin-top: .8rem; font-size: .85rem; }
+  input[type=email], input[type=text] { width: 100%; padding: .5rem; box-sizing: border-box; }
+  textarea { width: 100%; padding: .5rem; box-sizing: border-box; min-height: 140px; font-family: inherit; }
+  .actions { margin-top: 1rem; display: flex; gap: .75rem; }
+  button { padding: .6rem 1.2rem; border-radius: 6px; border: none; font-size: .95rem; cursor: pointer; }
+  .approve { background: #1a6e2a; color: #fff; }
+  .reject { background: #a4262c; color: #fff; }
+  .hint { color: #888; font-size: .78rem; }
+  .empty { color: #888; }
+  select.delivery-mode-select { width: 100%; padding: .5rem; box-sizing: border-box; margin-top: .3rem; }
+  .error-list, .sent-list { font-size: .85rem; color: #555; }
+  .error-list li { color: #a4262c; }
+</style>
+</head>
+<body>
+  <h1>Glambot — Review &amp; Approve</h1>
+  <p class="hint">Nothing is uploaded or emailed until you click Approve on a clip below.</p>
+  <p><a href="{{ url_for('new_project_form') }}">+ New Project</a></p>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <div class="flash {{ category }}">{{ message }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  {% if not cards %}
+    <p class="empty">No clips waiting for review right now.</p>
+  {% endif %}
+
+  {% for card in cards %}
+    {% set job = card.job %}
+    <div class="card">
+      <strong>{{ job.project }}</strong> / {{ job.filename }}
+      <div class="meta">Job #{{ job.id }} · ready since {{ job.updated_at }}</div>
+
+      {% if card.config_error %}
+        <div class="flash error">Config problem: {{ card.config_error }}</div>
+      {% endif %}
+      {% if job.error %}
+        <div class="flash error">Last attempt failed: {{ job.error }}</div>
+      {% endif %}
+
+      <video controls preload="metadata">
+        <source src="{{ url_for('video', job_id=job.id) }}" type="video/mp4">
+      </video>
+
+      <form method="post" action="{{ url_for('approve', job_id=job.id) }}" class="approve-form">
+        <label for="delivery_mode-{{ job.id }}">Delivery method</label>
+        <select id="delivery_mode-{{ job.id }}" name="delivery_mode" class="delivery-mode-select">
+          <option value="email" {% if card.delivery_mode_default == 'email' %}selected{% endif %}>Email to client</option>
+          <option value="qr_only" {% if card.delivery_mode_default == 'qr_only' %}selected{% endif %}>Instant QR download (kiosk)</option>
+        </select>
+
+        <div class="email-fields">
+          <label for="recipient-{{ job.id }}">Recipient email</label>
+          <input type="email" id="recipient-{{ job.id }}" name="recipient_email"
+                 value="{{ card.recipient_default }}">
+
+          <label for="subject-{{ job.id }}">Subject</label>
+          <input type="text" id="subject-{{ job.id }}" name="subject"
+                 value="{{ card.subject_default }}">
+
+          <label for="body-{{ job.id }}">
+            Message
+            <span class="hint">— {{ '{link}' }} is filled in automatically once the file uploads</span>
+          </label>
+          <textarea id="body-{{ job.id }}" name="body">{{ card.body_default }}</textarea>
+        </div>
+
+        <div class="actions">
+          <button type="submit" class="approve">Approve &amp; Send</button>
+        </div>
+      </form>
+      <form method="post" action="{{ url_for('reject', job_id=job.id) }}" style="display:inline">
+        <div class="actions">
+          <button type="submit" class="reject">Reject</button>
+        </div>
+      </form>
+    </div>
+  {% endfor %}
+
+  {% if error_jobs %}
+    <h2>Errors</h2>
+    <ul class="error-list">
+      {% for job in error_jobs %}
+        <li>{{ job.project }} / {{ job.filename }} — {{ job.error }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  {% if sent_jobs %}
+    <h2>Recently sent</h2>
+    <ul class="sent-list">
+      {% for job in sent_jobs %}
+        <li>{{ job.project }} / {{ job.filename }} → {{ job.recipient_email or 'QR kiosk' }} ({{ job.sent_at }})</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  <script>
+    document.querySelectorAll('.approve-form').forEach(function (form) {
+      var select = form.querySelector('.delivery-mode-select');
+      var emailFields = form.querySelector('.email-fields');
+      function sync() {
+        emailFields.style.display = select.value === 'qr_only' ? 'none' : '';
+      }
+      select.addEventListener('change', sync);
+      sync();
+    });
+  </script>
+</body>
+</html>

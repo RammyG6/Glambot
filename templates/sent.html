@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glambot — Sent</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 500px; margin: 3rem auto; text-align: center; color: #222; }
+  img { margin: 1.5rem 0; }
+  a.back { display: inline-block; margin-top: 2rem; }
+  .link { word-break: break-all; font-size: .85rem; color: #555; }
+</style>
+</head>
+<body>
+  <h1>Sent ✓</h1>
+  <p>{{ job.project }} / {{ job.filename }} was uploaded and emailed to the recipient.</p>
+  <p>Scan to open on another device:</p>
+  <img src="{{ qr_data_uri }}" alt="QR code for download link" width="220" height="220">
+  <p class="link"><a href="{{ link }}" target="_blank">{{ link }}</a></p>
+  <a class="back" href="{{ url_for('index') }}">&larr; Back to review queue</a>
+</body>
+</html>

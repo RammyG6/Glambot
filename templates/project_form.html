@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glambot — New Project</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.4rem; }
+  .back { display: inline-block; margin-bottom: 1rem; color: #555; text-decoration: none; }
+  .flash.error { background: #fdecea; color: #a4262c; padding: .6rem 1rem; border-radius: 6px; margin-bottom: 1rem; }
+  .layout { display: flex; gap: 2rem; align-items: flex-start; flex-wrap: wrap; }
+  form { flex: 1 1 420px; min-width: 320px; }
+  .preview-col { flex: 0 0 280px; }
+  fieldset { border: 1px solid #ddd; border-radius: 8px; margin-bottom: 1.2rem; padding: .8rem 1rem 1rem; }
+  legend { font-weight: 600; font-size: .9rem; color: #444; padding: 0 .4rem; }
+  label { display: block; font-weight: 600; margin-top: .7rem; font-size: .85rem; }
+  input[type=text], input[type=email], input[type=number], select {
+    width: 100%; padding: .5rem; box-sizing: border-box; margin-top: .2rem;
+  }
+  input[type=range] { width: 100%; }
+  .row { display: flex; gap: .8rem; }
+  .row > div { flex: 1; }
+  .hidden { display: none; }
+  .hint { color: #888; font-size: .78rem; margin-top: .2rem; }
+  .slider-value { font-weight: 600; font-size: .82rem; color: #444; }
+  button { padding: .7rem 1.4rem; border-radius: 6px; border: none; font-size: .95rem; cursor: pointer; margin-top: 1.2rem; background: #1a6e2a; color: #fff; }
+  .preview-frame { position: relative; width: 260px; background: #1b1b1b; margin: 0 auto; overflow: hidden; border-radius: 6px; background-image: linear-gradient(45deg, #262626 25%, transparent 25%), linear-gradient(-45deg, #262626 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #262626 75%), linear-gradient(-45deg, transparent 75%, #262626 75%); background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0px; }
+  .preview-frame img { position: absolute; }
+  .preview-caption { text-align: center; color: #888; font-size: .78rem; margin-top: .5rem; }
+</style>
+</head>
+<body>
+  <a class="back" href="{{ url_for('index') }}">&larr; Back to review queue</a>
+  <h1>New Project</h1>
+  <p class="hint">Fills in config.json for you — no need to hand-write it. After saving, drop footage into the project's folder to start processing.</p>
+
+  {% if error %}
+    <div class="flash error">{{ error }}</div>
+  {% endif %}
+
+  <div class="layout">
+    <form method="post" enctype="multipart/form-data" id="projectForm">
+      <fieldset>
+        <legend>Project</legend>
+        <label for="project_name">Project name</label>
+        <input type="text" id="project_name" name="project_name" value="{{ values.get('project_name', '') }}" required>
+        <p class="hint">Becomes the folder name under inbox/ — letters, numbers, spaces, - or _ only.</p>
+
+        <label for="delivery_mode">Delivery method</label>
+        <select id="delivery_mode" name="delivery_mode">
+          {% for val, label in delivery_modes %}
+            <option value="{{ val }}" {% if values.get('delivery_mode', 'email') == val %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <p class="hint">Operators can override this per clip on the Approve screen.</p>
+
+        <label for="recipient_email" id="recipient_email_label">Client email</label>
+        <input type="email" id="recipient_email" name="recipient_email" value="{{ values.get('recipient_email', '') }}">
+
+        <div class="row">
+          <div>
+            <label for="trim_start">Trim start</label>
+            <input type="text" id="trim_start" name="trim_start" placeholder="00:00:02" value="{{ values.get('trim_start', '') }}" required>
+          </div>
+          <div>
+            <label for="trim_end">Trim end</label>
+            <input type="text" id="trim_end" name="trim_end" placeholder="00:00:30" value="{{ values.get('trim_end', '') }}" required>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Output settings</legend>
+        <label for="resolution_preset">Resolution</label>
+        <select id="resolution_preset" name="resolution_preset">
+          {% for val, label in resolution_presets %}
+            <option value="{{ val }}" {% if values.get('resolution_preset') == val %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+          <option value="custom" {% if values.get('resolution_preset') == 'custom' %}selected{% endif %}>Custom&hellip;</option>
+        </select>
+        <div class="row hidden" id="customResolutionRow">
+          <div>
+            <label for="custom_width">Width</label>
+            <input type="number" id="custom_width" name="custom_width" min="1" value="{{ values.get('custom_width', '') }}">
+          </div>
+          <div>
+            <label for="custom_height">Height</label>
+            <input type="number" id="custom_height" name="custom_height" min="1" value="{{ values.get('custom_height', '') }}">
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="fps_preset">Frame rate</label>
+            <select id="fps_preset" name="fps_preset">
+              <option value="" {% if values.get('fps_preset', '') == '' %}selected{% endif %}>Keep source</option>
+              {% for f in fps_presets %}
+                <option value="{{ f }}" {% if values.get('fps_preset') == f|string %}selected{% endif %}>{{ f }} fps</option>
+              {% endfor %}
+              <option value="custom" {% if values.get('fps_preset') == 'custom' %}selected{% endif %}>Custom&hellip;</option>
+            </select>
+            <input type="number" class="hidden" id="custom_fps" name="custom_fps" min="1" placeholder="e.g. 48" value="{{ values.get('custom_fps', '') }}">
+          </div>
+          <div>
+            <label for="bitrate_preset">Bitrate</label>
+            <select id="bitrate_preset" name="bitrate_preset">
+              {% for b in bitrate_presets %}
+                <option value="{{ b }}" {% if values.get('bitrate_preset') == b %}selected{% endif %}>{{ b }}</option>
+              {% endfor %}
+              <option value="custom" {% if values.get('bitrate_preset') == 'custom' %}selected{% endif %}>Custom&hellip;</option>
+            </select>
+            <input type="text" class="hidden" id="custom_bitrate" name="custom_bitrate" placeholder="e.g. 10M" value="{{ values.get('custom_bitrate', '') }}">
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Overlay graphic</legend>
+        <label for="overlay_file">Overlay image</label>
+        <input type="file" id="overlay_file" name="overlay_file" accept="image/*" required>
+
+        <label for="overlay_position">Position</label>
+        <select id="overlay_position" name="overlay_position">
+          {% for pos in overlay_positions %}
+            <option value="{{ pos }}" {% if values.get('overlay_position', 'full') == pos %}selected{% endif %}>{{ pos }}</option>
+          {% endfor %}
+        </select>
+
+        <label for="overlay_scale">Size (% of frame width) — <span class="slider-value" id="overlay_scale_value">{{ values.get('overlay_scale', 30) }}</span>%</label>
+        <input type="range" id="overlay_scale" name="overlay_scale" min="1" max="100" value="{{ values.get('overlay_scale', 30) }}">
+
+        <div id="customPositionRow" class="hidden">
+          <label for="overlay_x">Horizontal position — <span class="slider-value" id="overlay_x_value">{{ values.get('overlay_x', 50) }}</span>%</label>
+          <input type="range" id="overlay_x" name="overlay_x" min="0" max="100" value="{{ values.get('overlay_x', 50) }}">
+          <label for="overlay_y">Vertical position — <span class="slider-value" id="overlay_y_value">{{ values.get('overlay_y', 50) }}</span>%</label>
+          <input type="range" id="overlay_y" name="overlay_y" min="0" max="100" value="{{ values.get('overlay_y', 50) }}">
+        </div>
+      </fieldset>
+
+      <button type="submit">Create Project</button>
+    </form>
+
+    <div class="preview-col">
+      <div class="preview-frame" id="previewFrame">
+        <img id="previewOverlay" style="display:none;">
+      </div>
+      <p class="preview-caption">Approximate preview — actual export composites at full resolution.</p>
+    </div>
+  </div>
+
+<script>
+(function () {
+  const deliveryMode = document.getElementById('delivery_mode');
+  const recipientEmailLabel = document.getElementById('recipient_email_label');
+
+  const resolutionPreset = document.getElementById('resolution_preset');
+  const customResolutionRow = document.getElementById('customResolutionRow');
+  const customWidth = document.getElementById('custom_width');
+  const customHeight = document.getElementById('custom_height');
+
+  const fpsPreset = document.getElementById('fps_preset');
+  const customFps = document.getElementById('custom_fps');
+
+  const bitratePreset = document.getElementById('bitrate_preset');
+  const customBitrate = document.getElementById('custom_bitrate');
+
+  const overlayFile = document.getElementById('overlay_file');
+  const overlayPosition = document.getElementById('overlay_position');
+  const overlayScale = document.getElementById('overlay_scale');
+  const overlayScaleValue = document.getElementById('overlay_scale_value');
+  const customPositionRow = document.getElementById('customPositionRow');
+  const overlayX = document.getElementById('overlay_x');
+  const overlayY = document.getElementById('overlay_y');
+  const overlayXValue = document.getElementById('overlay_x_value');
+  const overlayYValue = document.getElementById('overlay_y_value');
+
+  const previewFrame = document.getElementById('previewFrame');
+  const previewOverlay = document.getElementById('previewOverlay');
+
+  const FRAME_W = 260;
+  const MARGIN_REAL_PX = 20;
+
+  function targetResolution() {
+    if (resolutionPreset.value === 'custom') {
+      const w = parseInt(customWidth.value, 10);
+      const h = parseInt(customHeight.value, 10);
+      if (w > 0 && h > 0) return [w, h];
+      return [1080, 1920];
+    }
+    const [w, h] = resolutionPreset.value.split('x').map(Number);
+    return [w, h];
+  }
+
+  function toggleVisibility() {
+    customResolutionRow.classList.toggle('hidden', resolutionPreset.value !== 'custom');
+    customFps.classList.toggle('hidden', fpsPreset.value !== 'custom');
+    customBitrate.classList.toggle('hidden', bitratePreset.value !== 'custom');
+    customPositionRow.classList.toggle('hidden', overlayPosition.value !== 'custom');
+    recipientEmailLabel.textContent = deliveryMode.value === 'qr_only' ? 'Client email (optional)' : 'Client email';
+  }
+
+  function updatePreview() {
+    const [targetW, targetH] = targetResolution();
+    const frameH = FRAME_W * (targetH / targetW);
+    previewFrame.style.width = FRAME_W + 'px';
+    previewFrame.style.height = frameH + 'px';
+
+    if (!previewOverlay.src) return;
+
+    const scalePct = parseFloat(overlayScale.value) || 30;
+    const overlayW = (scalePct / 100) * FRAME_W;
+    const naturalRatio = previewOverlay.naturalWidth
+      ? previewOverlay.naturalHeight / previewOverlay.naturalWidth
+      : 1;
+    const overlayH = overlayW * naturalRatio;
+    const marginPreview = MARGIN_REAL_PX * (FRAME_W / targetW);
+
+    let left = 0, top = 0;
+    const pos = overlayPosition.value;
+    if (pos === 'full') {
+      left = 0; top = 0;
+    } else if (pos === 'top-left') {
+      left = marginPreview; top = marginPreview;
+    } else if (pos === 'top-right') {
+      left = FRAME_W - overlayW - marginPreview; top = marginPreview;
+    } else if (pos === 'bottom-left') {
+      left = marginPreview; top = frameH - overlayH - marginPreview;
+    } else if (pos === 'bottom-right') {
+      left = FRAME_W - overlayW - marginPreview; top = frameH - overlayH - marginPreview;
+    } else if (pos === 'custom') {
+      left = (parseFloat(overlayX.value) / 100) * FRAME_W;
+      top = (parseFloat(overlayY.value) / 100) * frameH;
+    }
+
+    previewOverlay.style.width = overlayW + 'px';
+    previewOverlay.style.height = 'auto';
+    previewOverlay.style.left = left + 'px';
+    previewOverlay.style.top = top + 'px';
+    previewOverlay.style.display = 'block';
+  }
+
+  overlayFile.addEventListener('change', function () {
+    const file = overlayFile.files[0];
+    if (!file) return;
+    previewOverlay.onload = updatePreview;
+    previewOverlay.src = URL.createObjectURL(file);
+  });
+
+  overlayScale.addEventListener('input', function () {
+    overlayScaleValue.textContent = overlayScale.value;
+    updatePreview();
+  });
+  overlayX.addEventListener('input', function () {
+    overlayXValue.textContent = overlayX.value;
+    updatePreview();
+  });
+  overlayY.addEventListener('input', function () {
+    overlayYValue.textContent = overlayY.value;
+    updatePreview();
+  });
+
+  [resolutionPreset, customWidth, customHeight, fpsPreset, bitratePreset, overlayPosition, deliveryMode].forEach(function (el) {
+    el.addEventListener('change', function () {
+      toggleVisibility();
+      updatePreview();
+    });
+  });
+  [customWidth, customHeight].forEach(function (el) {
+    el.addEventListener('input', updatePreview);
+  });
+
+  toggleVisibility();
+  updatePreview();
+})();
+</script>
+</body>
+</html>

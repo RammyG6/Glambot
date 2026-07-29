@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Scan to download</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, sans-serif; background: #0b0b0b; color: #fff;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: 100vh; padding: 2rem; box-sizing: border-box; text-align: center;
+  }
+  .thumb {
+    max-width: min(80vw, 480px); max-height: 45vh; border-radius: 12px;
+    box-shadow: 0 8px 40px rgba(0,0,0,.5); margin-bottom: 2rem; object-fit: contain;
+  }
+  .qr-wrap { background: #fff; padding: 1.5rem; border-radius: 16px; }
+  .qr-wrap img { width: min(50vw, 320px); height: auto; display: block; }
+  h1 { font-size: clamp(1.4rem, 3vw, 2.2rem); margin: 1.5rem 0 .5rem; }
+  p.sub { color: #aaa; font-size: 1rem; }
+  a.exit { position: fixed; bottom: 1rem; right: 1rem; color: #444; font-size: .75rem; text-decoration: none; }
+</style>
+</head>
+<body>
+  <img class="thumb" src="{{ url_for('thumbnail', job_id=job.id) }}" alt="Your clip"
+       onerror="this.style.display='none'">
+  <h1>Scan to download your video</h1>
+  <div class="qr-wrap">
+    <img src="{{ qr_data_uri }}" alt="QR code" width="320" height="320">
+  </div>
+  <p class="sub">{{ job.project }}</p>
+  <a class="exit" href="{{ url_for('index') }}">&larr; queue</a>
+</body>
+</html>

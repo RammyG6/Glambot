@@ -1,0 +1,18 @@
+# Runtime data (footage, generated files, secrets) — never committed
+inbox/
+overlays/
+!overlays/.gitkeep
+*.sqlite
+*.sqlite3
+.env
+credentials.json
+token.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# macOS
+.DS_Store

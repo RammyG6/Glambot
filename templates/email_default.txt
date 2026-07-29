@@ -1,0 +1,10 @@
+Subject: Your video is ready — {project} / {filename}
+
+Hi,
+
+Your video is ready to view and download:
+
+{link}
+
+Best,
+Glambot
