@@ -19,6 +19,8 @@ inbox/
     Email Sent File/              # archive, created automatically after sending
 overlays/
   brand.png                       # overlay graphics referenced by config.json
+soundtracks/
+  upbeat.mp3                      # reusable background-music library
 ```
 
 1. Set up a project's `config.json` — either hand-write it (schema below), or
@@ -29,6 +31,9 @@ overlays/
    fine — the form doesn't upload video files, only the config).
 3. The watcher notices the new file once it's finished copying, trims/overlays/
    compresses it with ffmpeg, and writes the result to `Output_ReadytoSend/`.
+   The **original** is then moved into an `Edited Footages/` subfolder inside
+   its own import folder — so the drop folder stays clean and processed files
+   are never picked up again.
 4. Open the review app (`http://127.0.0.1:5000`), preview the clip, choose a
    **delivery method** if you want to override the project default, edit the
    recipient email and the email subject/message if needed, and click **Approve**
@@ -49,13 +54,25 @@ overlays/
 {
   "recipient_email": "client@example.com",
   "delivery_mode": "email",
+  "auto_deliver": false,
   "bitrate": "5M",
   "resolution": "1080x1920",
   "aspect_ratio": "9:16",
+  "second_resolution": "1920x1080",
+  "second_bitrate": "8M",
   "overlay": "overlays/brand.png",
   "overlay_position": "full",
   "overlay_scale": 20,
   "fps": 30,
+  "rotation": 0,
+  "position_x": 0,
+  "position_y": 0,
+  "soundtrack": "soundtracks/upbeat.mp3",
+  "soundtrack_volume_db": -3,
+  "original_volume_db": -60,
+  "soundtrack_trim": { "start": "00:00:10", "end": "00:00:40" },
+  "source_dir": "/Users/you/Desktop/sd-card-import",
+  "drive_folder_id": "1AbCdEfGhIjKlmNoPQRstuVwxyz",
   "trim": { "start": "00:00:02", "end": "00:00:30" },
   "overrides": {
     "footage2.mov": { "trim": { "start": "00:00:00", "end": "00:00:12" } }
@@ -69,8 +86,11 @@ overlays/
 - `recipient_email` is only a **default** — you can change it per clip on the
   review screen before sending. Required when `delivery_mode` is `email`;
   optional (and can be left blank) when it's `qr_only`.
-- `trim` applies to every file in the project unless overridden per filename
-  under `overrides`.
+- `auto_deliver` (optional, default `false`): skip the manual Approve step
+  entirely — see "Full automation" below.
+- `trim` is now fully **optional** — leave `start`/`end` blank or omit `trim`
+  entirely to export the full clip untrimmed. It applies to every file in the
+  project unless overridden per filename under `overrides`.
 - `overlay_position`: `full` (fills the frame), `top-left` / `top-right` /
   `bottom-left` / `bottom-right` (fixed 20px margin), or `custom` (needs
   `overlay_x` / `overlay_y`, 0–100, the overlay's top-left corner as a
@@ -81,6 +101,24 @@ overlays/
   native pixel size.
 - `fps` (optional): forces an output frame rate. Without it, the source's
   frame rate is kept.
+- `rotation` (optional, one of `0`, `90`, `-90`, `180`, default `0`): rotates
+  the source before scaling/cropping.
+- `position_x` / `position_y` (optional, pixels, default `0`): pans which part
+  of the source frame is kept by the fill-crop, instead of always cropping
+  dead-center. Never introduces blank space — an extreme value just clamps to
+  the edge of the source frame.
+- `second_resolution` / `second_bitrate` (optional): export a second
+  resolution/aspect ratio alongside the primary one from the same clip — see
+  "Dual-resolution export" below.
+- `soundtrack` / `soundtrack_volume_db` / `original_volume_db` /
+  `soundtrack_trim` (all optional): mix in background music — see
+  "Soundtrack" below.
+- `source_dir` (optional, absolute path): watch an arbitrary folder on this
+  machine for footage instead of `inbox/<project>/` — see "Custom footage
+  source folder" below.
+- `drive_folder_id` (optional): upload this project's clips to a specific
+  Google Drive folder instead of the default one set by `DRIVE_FOLDER_ID` in
+  `.env`. Accepts either the bare folder ID or its full share URL.
 - `overlay` path is relative to the repo root (e.g. put shared graphics in
   `overlays/`).
 
@@ -104,6 +142,96 @@ the review screen before approving:
   showing a thumbnail grabbed from the finished clip next to a large QR code —
   put that on a monitor at the venue and the client scans it themselves to
   download instantly.
+
+### Full automation
+
+Check **"Fully automatic delivery"** on the New Project form (or set
+`"auto_deliver": true` in `config.json`) to skip the manual Approve step
+entirely — as soon as a clip finishes processing, it uploads and delivers
+itself automatically, using the project's default recipient/email template
+(for `email` mode) or generating the kiosk QR photo straight away (for
+`qr_only` mode). Works with either delivery method.
+
+Since there's no Approve click for `qr_only` + full automation, open
+**`http://127.0.0.1:5000/projects/<project name>/kiosk`** on the venue
+monitor instead — a self-updating page (every 5s, no full reload so playback
+isn't interrupted) with a grid of every delivered clip's thumbnail + QR code
+on the left and, on the right, a **playback panel** that auto-plays (muted,
+looping) the single newest clip, switching to a newer one as it lands.
+
+Clips delivered via QR aren't emailed, but you can email any of them after
+the fact from **"Email a delivered clip"** on the review page (`/clips`):
+pick a clip, enter a recipient/subject/message, and Send — it emails the
+clip's existing Drive link (with QR), no re-upload or re-processing.
+
+For this exact combination (`qr_only` + `auto_deliver`), the video,
+thumbnail, and the composite QR-code photo all stay together in the
+project's `Output/` folder — there's no manual review step "selecting"
+anything out of it, so nothing moves to `Selected Output/`/`Instant
+Download/` the way a manually-approved `qr_only` clip does.
+
+If an automatic delivery fails (bad credentials, no network, …), the clip
+simply stays in the normal review queue with the error shown inline — exactly
+like a manual delivery failure — so you can fix the problem and click Approve
+once by hand.
+
+### Rotation & repositioning
+
+`rotation` quickly rotates the source ±90°/180° before it's scaled and
+cropped to the target resolution. `position_x`/`position_y` (pixels) pan
+*which part* of the source frame the fill-crop keeps, instead of always
+cropping dead-center — useful when the subject isn't centered in the raw
+footage. This never adds blank/letterboxed space: an extreme offset just
+clamps to the edge of the available frame.
+
+### Dual-resolution export
+
+Check **"Also export a second resolution"** on the New Project form to
+produce two output files from the same source clip in one pass (e.g. a 9:16
+vertical cut and a 16:9 horizontal cut). Both stay on **one review card** —
+a single Approve click uploads and delivers both together: one email with
+both links (add `{link2}` to your subject/body template to place it
+precisely, otherwise it's appended automatically), or a kiosk screen showing
+two QR codes side by side.
+
+### Soundtrack
+
+Add background music per project: pick **"Upload new file…"** on the New
+Project form the first time (saved into a shared `soundtracks/` library) or
+choose an already-uploaded track from the dropdown on any later project.
+`soundtrack_volume_db` / `original_volume_db` (-60 to +12 dB, default `0`)
+balance the music against the clip's own audio — mix both, or push one all
+the way down to effectively mute it. `soundtrack_trim` optionally selects
+just a portion of a longer track. If the source clip has no audio track at
+all, the soundtrack plays alone automatically.
+
+### Custom footage source folder
+
+By default, footage must be dropped into `inbox/<project>/`. Set a
+**"Footage source folder"** on the New Project form (with an in-app folder
+browser, or just paste/type a path) to instead watch an arbitrary folder
+anywhere on this machine — e.g. an SD-card import folder or a Dropbox folder
+— while `config.json` and the processed output still live under
+`inbox/<project>/` as normal. New/changed source folders are picked up
+automatically within about 10 seconds, no restart needed.
+
+**Sharing one folder across multiple projects:** you can point several
+projects at the exact same folder (handy for comparing different settings
+against the same test clips), but only **one** of them is ever actively
+watched at a time — footage dropped there always goes to whichever project
+is currently "active" for that folder, never to more than one. The review
+page shows a **"Shared footage folders"** section whenever this happens,
+listing every project pointing at that folder with a **"Make active"**
+button to switch which one receives new footage. The choice is sticky (saved
+until you change it again), not silently decided alphabetically.
+
+### Per-project Google Drive folder
+
+By default every project uploads to the single folder set by
+`DRIVE_FOLDER_ID` in `.env`. Set **"Google Drive destination folder"** on the
+New Project form to send a specific project's clips to a different Drive
+folder instead — open the folder in Drive, copy its URL (or just the ID from
+the end of it), and paste it in. Leave it blank to keep using the default.
 
 ## One-time setup
 
@@ -156,7 +284,14 @@ unless you want the literal text removed.
 3. Copy in the gitignored secrets from an already-working machine (`.env`,
    `credentials.json`, `token.json`) and your real `overlays/*` images — see
    "Migrating to another machine" for the full list.
-4. Double-click `run.bat` (or run it from a Command Prompt/PowerShell window).
+4. **(Recommended)** install a full **ffmpeg** so `ffprobe` is available:
+   `winget install Gyan.FFmpeg` (then reopen your terminal so it's on PATH).
+   The app runs *without* it — it falls back to the bundled `imageio-ffmpeg`
+   binary — but that bundle ships only `ffmpeg`, not `ffprobe`, and `ffprobe`
+   is what powers **thumbnails/kiosk previews, the live progress %, and
+   audio-stream detection** (needed if you mix a soundtrack onto a silent
+   clip). Core trimming/overlay/compress works either way.
+5. Double-click `run.bat` (or run it from a Command Prompt/PowerShell window).
    First run creates a virtualenv and installs dependencies, so it'll take a
    minute; after that it starts the review app the same as `./run.sh` does on
    macOS.
@@ -164,6 +299,13 @@ unless you want the literal text removed.
 There's no Windows equivalent of the double-click Mac `.app` in this repo —
 `run.bat` is the Windows launcher; it's plain-double-click-friendly once
 Python and `.env` are set up, it just briefly shows a console window.
+
+Notes for Windows:
+- Set `INBOX_DIR` in `.env` to a Windows path, e.g. `INBOX_DIR=C:\Glambot\project`.
+- The New Project form's **folder browser** starts at your home folder and
+  can't hop to other drive letters — to point a project at a folder on another
+  drive (e.g. `D:\footage`), just **paste that path** into the field instead of
+  browsing.
 
 ## Running it
 
@@ -208,6 +350,18 @@ Then run `./run.sh` and watch `inbox/demo/Output_ReadytoSend/` appear.
 
 ## Status / troubleshooting
 
+- The review page (titled **Glambot Automation**) shows a **Now processing**
+  section with a live percentage progress bar for whatever clip ffmpeg is
+  currently rendering in the background — it fills in real time and, for a
+  dual-resolution project, spans both render passes 0→100%.
+- Two collapsible logs at the bottom of the review page (hidden by default,
+  each remembers its open/closed state): the **output log** lists every clip
+  that's been processed/edited regardless of delivery mode, and the **email
+  sent log** lists only clips delivered via email mode (with recipient +
+  Drive link).
+- The monitoring page (`/projects/<name>/kiosk`) shows **all** of a project's
+  delivered clips as a newest-first grid of thumbnail + QR code(s), refreshing
+  itself every few seconds — a "wall of scan-your-clip" for a venue.
 - Invalid or missing `config.json` → the clip won't process; the error shows
   up in the review app's **Errors** section once a footage file has landed.
 - Failed Drive upload or email send on Approve → the job **stays in the

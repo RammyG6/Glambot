@@ -38,7 +38,7 @@ def _get_credentials() -> Credentials:
 
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
-        _TOKEN_PATH.write_text(creds.to_json())
+        _TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
         return creds
 
     if not _CREDENTIALS_PATH.exists():

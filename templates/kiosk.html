@@ -4,30 +4,42 @@
 <meta charset="utf-8">
 <title>Scan to download</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
   html, body { height: 100%; margin: 0; }
   body {
-    font-family: -apple-system, sans-serif; background: #0b0b0b; color: #fff;
+    max-width: none; background: var(--bg); color: var(--text);
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     min-height: 100vh; padding: 2rem; box-sizing: border-box; text-align: center;
   }
   .thumb {
-    max-width: min(80vw, 480px); max-height: 45vh; border-radius: 12px;
-    box-shadow: 0 8px 40px rgba(0,0,0,.5); margin-bottom: 2rem; object-fit: contain;
+    max-width: min(80vw, 480px); max-height: 45vh; border-radius: var(--radius);
+    box-shadow: var(--shadow); margin-bottom: 2rem; object-fit: contain;
   }
-  .qr-wrap { background: #fff; padding: 1.5rem; border-radius: 16px; }
-  .qr-wrap img { width: min(50vw, 320px); height: auto; display: block; }
+  .qr-row { display: flex; gap: 1.5rem; flex-wrap: wrap; justify-content: center; }
+  .qr-wrap { background: #fff; padding: 1.5rem; border-radius: var(--radius-lg); text-align: center; }
+  .qr-wrap img { width: min(45vw, 280px); height: auto; display: block; }
+  .qr-wrap .qr-label { color: #1d1d1f; font-size: .85rem; font-weight: 600; margin-top: .6rem; }
   h1 { font-size: clamp(1.4rem, 3vw, 2.2rem); margin: 1.5rem 0 .5rem; }
-  p.sub { color: #aaa; font-size: 1rem; }
-  a.exit { position: fixed; bottom: 1rem; right: 1rem; color: #444; font-size: .75rem; text-decoration: none; }
+  p.sub { color: var(--text-secondary); font-size: 1rem; }
+  a.exit { position: fixed; bottom: 1rem; right: 1rem; color: var(--text-secondary); font-size: .75rem; margin: 0; }
 </style>
 </head>
 <body>
   <img class="thumb" src="{{ url_for('thumbnail', job_id=job.id) }}" alt="Your clip"
        onerror="this.style.display='none'">
   <h1>Scan to download your video</h1>
-  <div class="qr-wrap">
-    <img src="{{ qr_data_uri }}" alt="QR code" width="320" height="320">
+  <div class="qr-row">
+    <div class="qr-wrap">
+      <img src="{{ qr_data_uri }}" alt="QR code" width="280" height="280">
+      {% if link2 %}<div class="qr-label">Version 1</div>{% endif %}
+    </div>
+    {% if link2 %}
+    <div class="qr-wrap">
+      <img src="{{ qr_data_uri2 }}" alt="Second QR code" width="280" height="280">
+      <div class="qr-label">Version 2</div>
+    </div>
+    {% endif %}
   </div>
   <p class="sub">{{ job.project }}</p>
   <a class="exit" href="{{ url_for('index') }}">&larr; queue</a>

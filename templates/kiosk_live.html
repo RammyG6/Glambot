@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ project }} — Now showing</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  body { max-width: 1800px; background: var(--bg); color: var(--text); padding: 2rem 1.5rem 4rem; }
+  h1 { text-align: center; margin-bottom: .3rem; }
+  p.sub { text-align: center; color: var(--text-secondary); margin: 0 0 2rem; }
+  p.waiting { text-align: center; color: var(--text-secondary); font-size: 1.1rem; margin-top: 4rem; }
+  /* Two columns: grid of scan codes on the left, playback panel on the right. */
+  .layout { display: flex; gap: 2rem; align-items: flex-start; }
+  .grid-col { flex: 1 1 auto; min-width: 0; }
+  .play-col { flex: 0 0 34%; position: sticky; top: 2rem; }
+  .play-col h2 { margin-top: 0; font-size: 1rem; color: var(--text-secondary); text-align: center; }
+  .play-col video { width: 100%; max-height: 78vh; background: #000; border-radius: var(--radius-lg); box-shadow: var(--shadow); }
+  .play-col .now-playing { text-align: center; color: var(--text-secondary); font-size: .85rem; margin-top: .6rem; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; }
+  @media (max-width: 1100px) { .layout { flex-direction: column; } .play-col { position: static; width: 100%; } .grid { grid-template-columns: repeat(4, 1fr); } }
+  @media (max-width: 700px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+  .clip { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.1rem; text-align: center; }
+  .clip .thumb { width: 100%; max-height: 300px; object-fit: contain; border-radius: var(--radius); margin-bottom: .9rem; }
+  .clip .qr-row { display: flex; gap: .9rem; justify-content: center; }
+  .clip .qr-wrap { background: #fff; padding: .7rem; border-radius: var(--radius-sm); }
+  .clip .qr-wrap img { width: 100%; max-width: 160px; height: auto; display: block; }
+  .clip .qr-wrap .qr-label { color: #1d1d1f; font-size: .76rem; font-weight: 600; margin-top: .4rem; }
+  .clip .name { font-size: .88rem; color: var(--text-secondary); margin-top: .7rem; word-break: break-word; }
+</style>
+</head>
+<body>
+  <h1>Scan to download your video</h1>
+  <p class="sub">{{ project }}</p>
+
+  <div class="layout" id="layout" {% if not items %}style="display:none"{% endif %}>
+    <div class="grid-col">
+      <div class="grid" id="grid">
+        {% for item in items %}
+          <div class="clip">
+            <img class="thumb" src="{{ url_for('thumbnail', job_id=item.job.id) }}" alt="Clip"
+                 onerror="this.style.display='none'">
+            <div class="qr-row">
+              <div class="qr-wrap">
+                <img src="{{ item.qr_data_uri }}" alt="QR code">
+                {% if item.qr_data_uri2 %}<div class="qr-label">V1</div>{% endif %}
+              </div>
+              {% if item.qr_data_uri2 %}
+              <div class="qr-wrap">
+                <img src="{{ item.qr_data_uri2 }}" alt="Second QR code">
+                <div class="qr-label">V2</div>
+              </div>
+              {% endif %}
+            </div>
+            <div class="name">{{ item.job.filename }}</div>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="play-col">
+      <h2>Now playing</h2>
+      <video id="player" autoplay muted loop playsinline
+             {% if latest_id %}src="{{ url_for('video', job_id=latest_id) }}"{% endif %}></video>
+      <div class="now-playing" id="nowPlaying">{% if items %}{{ items[0].job.filename }}{% endif %}</div>
+    </div>
+  </div>
+
+  <p class="waiting" id="waiting" {% if items %}style="display:none"{% endif %}>Waiting for the first clip to be delivered&hellip;</p>
+
+  <script>
+    (function () {
+      var layout = document.getElementById('layout');
+      var waiting = document.getElementById('waiting');
+      var grid = document.getElementById('grid');
+      var player = document.getElementById('player');
+      var nowPlaying = document.getElementById('nowPlaying');
+      var currentLatest = {{ latest_id if latest_id else 'null' }};
+      var renderedIds = null;
+
+      function clipHtml(c) {
+        var qr2 = c.qr2 ? '<div class="qr-wrap"><img src="' + c.qr2 + '"><div class="qr-label">V2</div></div>' : '';
+        var v1label = c.qr2 ? '<div class="qr-label">V1</div>' : '';
+        return '<div class="clip">' +
+          '<img class="thumb" src="/thumbnail/' + c.id + '" onerror="this.style.display=\'none\'">' +
+          '<div class="qr-row"><div class="qr-wrap"><img src="' + c.qr + '">' + v1label + '</div>' + qr2 + '</div>' +
+          '<div class="name">' + c.filename + '</div></div>';
+      }
+
+      function poll() {
+        fetch('/projects/{{ project|urlencode }}/kiosk.json', { cache: 'no-store' })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            var clips = data.clips || [];
+            if (!clips.length) { layout.style.display = 'none'; waiting.style.display = ''; return; }
+            layout.style.display = ''; waiting.style.display = 'none';
+            // Re-render the grid only when the set of clips changes.
+            var ids = clips.map(function (c) { return c.id; }).join(',');
+            if (ids !== renderedIds) {
+              grid.innerHTML = clips.map(clipHtml).join('');
+              renderedIds = ids;
+            }
+            // Swap the video only when a newer clip has arrived — never
+            // interrupt the currently-playing one otherwise.
+            if (data.latest_id && data.latest_id !== currentLatest) {
+              currentLatest = data.latest_id;
+              player.src = '/video/' + data.latest_id;
+              player.load();
+              player.play().catch(function () {});
+              nowPlaying.textContent = clips[0].filename;
+            }
+          })
+          .catch(function () {});
+      }
+      setInterval(poll, 5000);
+    })();
+  </script>
+</body>
+</html>

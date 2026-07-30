@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glambot — Email a delivered clip</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  .clip-card { display: flex; gap: 1.25rem; align-items: flex-start; }
+  .clip-card .thumb { flex: 0 0 160px; }
+  .clip-card .thumb img { width: 160px; border-radius: var(--radius); background: #000; display: block; }
+  .clip-card .form { flex: 1; min-width: 0; }
+</style>
+</head>
+<body>
+  <a class="back" href="{{ url_for('index') }}">&larr; Back to review queue</a>
+  <h1>Email a delivered clip</h1>
+  <p class="hint">Send any already-delivered clip to a client by email — it uses the clip's existing download link (nothing is re-uploaded or re-processed).</p>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <div class="flash {{ category }}">{{ message }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  {% if not cards %}
+    <p class="empty">No delivered clips yet.</p>
+  {% endif %}
+
+  {% for card in cards %}
+    {% set job = card.job %}
+    <div class="card">
+      <div class="clip-card">
+        <div class="thumb">
+          <img src="{{ url_for('thumbnail', job_id=job.id) }}" alt="Clip"
+               onerror="this.style.display='none'">
+        </div>
+        <div class="form">
+          <strong>{{ job.project }}</strong> / {{ job.filename }}
+          <div class="meta">Delivered {{ job.sent_at }}</div>
+          <form method="post" action="{{ url_for('email_clip', job_id=job.id) }}">
+            <label for="recipient-{{ job.id }}">Recipient email</label>
+            <input type="email" id="recipient-{{ job.id }}" name="recipient_email" value="{{ card.recipient_default }}">
+
+            <label for="subject-{{ job.id }}">Subject</label>
+            <input type="text" id="subject-{{ job.id }}" name="subject" value="{{ card.subject_default }}">
+
+            <label for="body-{{ job.id }}">Message
+              <span class="hint">— {{ '{link}' }} is filled in automatically</span></label>
+            <textarea id="body-{{ job.id }}" name="body">{{ card.body_default }}</textarea>
+
+            <div class="actions">
+              <button type="submit" class="approve">Send email</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  {% endfor %}
+</body>
+</html>

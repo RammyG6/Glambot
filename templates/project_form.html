@@ -3,30 +3,24 @@
 <head>
 <meta charset="utf-8">
 <title>Glambot — New Project</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #222; }
-  h1 { font-size: 1.4rem; }
-  .back { display: inline-block; margin-bottom: 1rem; color: #555; text-decoration: none; }
-  .flash.error { background: #fdecea; color: #a4262c; padding: .6rem 1rem; border-radius: 6px; margin-bottom: 1rem; }
   .layout { display: flex; gap: 2rem; align-items: flex-start; flex-wrap: wrap; }
   form { flex: 1 1 420px; min-width: 320px; }
-  .preview-col { flex: 0 0 280px; }
-  fieldset { border: 1px solid #ddd; border-radius: 8px; margin-bottom: 1.2rem; padding: .8rem 1rem 1rem; }
-  legend { font-weight: 600; font-size: .9rem; color: #444; padding: 0 .4rem; }
-  label { display: block; font-weight: 600; margin-top: .7rem; font-size: .85rem; }
-  input[type=text], input[type=email], input[type=number], select {
-    width: 100%; padding: .5rem; box-sizing: border-box; margin-top: .2rem;
-  }
-  input[type=range] { width: 100%; }
-  .row { display: flex; gap: .8rem; }
-  .row > div { flex: 1; }
-  .hidden { display: none; }
-  .hint { color: #888; font-size: .78rem; margin-top: .2rem; }
-  .slider-value { font-weight: 600; font-size: .82rem; color: #444; }
-  button { padding: .7rem 1.4rem; border-radius: 6px; border: none; font-size: .95rem; cursor: pointer; margin-top: 1.2rem; background: #1a6e2a; color: #fff; }
-  .preview-frame { position: relative; width: 260px; background: #1b1b1b; margin: 0 auto; overflow: hidden; border-radius: 6px; background-image: linear-gradient(45deg, #262626 25%, transparent 25%), linear-gradient(-45deg, #262626 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #262626 75%), linear-gradient(-45deg, transparent 75%, #262626 75%); background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0px; }
+  .preview-col { flex: 0 0 280px; position: sticky; top: 2rem; }
+  .preview-frame { position: relative; width: 260px; background: #1b1b1b; margin: 0 auto; overflow: hidden; border-radius: var(--radius); background-image: linear-gradient(45deg, #2c2c2e 25%, transparent 25%), linear-gradient(-45deg, #2c2c2e 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #2c2c2e 75%), linear-gradient(-45deg, transparent 75%, #2c2c2e 75%); background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0px; }
   .preview-frame img { position: absolute; }
-  .preview-caption { text-align: center; color: #888; font-size: .78rem; margin-top: .5rem; }
+  .preview-caption { text-align: center; color: var(--text-secondary); font-size: .78rem; margin-top: .6rem; }
+  .browse-row { display: flex; gap: .5rem; align-items: flex-start; margin-top: .35rem; }
+  .browse-row input { flex: 1; margin-top: 0; }
+  .browse-row button { margin-top: 0; padding: .55rem 1rem; white-space: nowrap; font-size: .85rem; }
+  .folder-browser { display: none; border: 1px solid var(--border); border-radius: var(--radius-sm); margin-top: .5rem; padding: .6rem; background: var(--bg-elevated-2); max-height: 220px; overflow-y: auto; }
+  .folder-browser.open { display: block; }
+  .folder-browser .crumb { font-size: .78rem; color: var(--text-secondary); margin-bottom: .4rem; word-break: break-all; }
+  .folder-browser ul { list-style: none; margin: 0; padding: 0; }
+  .folder-browser li { padding: .4rem .5rem; cursor: pointer; border-radius: 6px; font-size: .85rem; }
+  .folder-browser li:hover { background: rgba(255,255,255,0.08); }
+  .folder-browser .use-here { margin-top: .5rem; padding: .5rem 1rem; font-size: .82rem; }
 </style>
 </head>
 <body>
@@ -59,14 +53,37 @@
 
         <div class="row">
           <div>
-            <label for="trim_start">Trim start</label>
-            <input type="text" id="trim_start" name="trim_start" placeholder="00:00:02" value="{{ values.get('trim_start', '') }}" required>
+            <label for="trim_start">Trim start (optional)</label>
+            <input type="text" id="trim_start" name="trim_start" placeholder="e.g. 00:00:02" value="{{ values.get('trim_start', '') }}">
           </div>
           <div>
-            <label for="trim_end">Trim end</label>
-            <input type="text" id="trim_end" name="trim_end" placeholder="00:00:30" value="{{ values.get('trim_end', '') }}" required>
+            <label for="trim_end">Trim end (optional)</label>
+            <input type="text" id="trim_end" name="trim_end" placeholder="e.g. 00:00:30" value="{{ values.get('trim_end', '') }}">
           </div>
         </div>
+        <p class="hint">Leave either side blank to not trim that side — leave both blank to export the full clip untrimmed.</p>
+
+        <label class="checkbox-label">
+          <input type="checkbox" id="auto_deliver" name="auto_deliver" {% if values.get('auto_deliver') == 'on' %}checked{% endif %}>
+          Fully automatic delivery
+        </label>
+        <p class="hint">Clips upload and deliver automatically as soon as they're processed — no per-clip Approve click. For QR-kiosk mode, open the project's "now showing" link (/projects/&lt;name&gt;/kiosk) on a venue monitor and it stays current on its own.</p>
+
+        <label for="source_dir">Footage source folder (optional)</label>
+        <div class="browse-row">
+          <input type="text" id="source_dir" name="source_dir" placeholder="Leave blank to use inbox/&lt;project name&gt;/" value="{{ values.get('source_dir', '') }}">
+          <button type="button" class="secondary" id="browseButton">Browse&hellip;</button>
+        </div>
+        <div class="folder-browser" id="folderBrowser">
+          <div class="crumb" id="folderBrowserPath"></div>
+          <ul id="folderBrowserList"></ul>
+          <button type="button" class="use-here secondary" id="useThisFolder">Use this folder</button>
+        </div>
+        <p class="hint">Point at any folder on this machine (e.g. an SD-card import folder) instead of dropping footage into inbox/. Leave blank for the default location.</p>
+
+        <label for="drive_folder_id">Google Drive destination folder (optional)</label>
+        <input type="text" id="drive_folder_id" name="drive_folder_id" placeholder="Paste a folder ID or its share link" value="{{ values.get('drive_folder_id', '') }}">
+        <p class="hint">Open the folder in Google Drive and paste its URL (or just the ID) here. Leave blank to use the default folder configured in .env for every project.</p>
       </fieldset>
 
       <fieldset>
@@ -112,12 +129,90 @@
             <input type="text" class="hidden" id="custom_bitrate" name="custom_bitrate" placeholder="e.g. 10M" value="{{ values.get('custom_bitrate', '') }}">
           </div>
         </div>
+
+        <div class="row">
+          <div>
+            <label for="rotation">Rotation</label>
+            <select id="rotation" name="rotation">
+              {% for val, label in rotation_choices %}
+                <option value="{{ val }}" {% if values.get('rotation', '0')|string == val|string %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="position_x">Reposition X (px)</label>
+            <input type="number" id="position_x" name="position_x" placeholder="0" value="{{ values.get('position_x', '') }}">
+          </div>
+          <div>
+            <label for="position_y">Reposition Y (px)</label>
+            <input type="number" id="position_y" name="position_y" placeholder="0" value="{{ values.get('position_y', '') }}">
+          </div>
+        </div>
+        <p class="hint">Pans which part of the source frame is kept after the fill-crop — never adds blank space. The preview on the right doesn't simulate rotation/repositioning.</p>
+
+        <label class="checkbox-label">
+          <input type="checkbox" id="second_resolution_enabled" name="second_resolution_enabled" {% if values.get('second_resolution_enabled') == 'on' %}checked{% endif %}>
+          Also export a second resolution
+        </label>
+        <div id="secondResolutionRow" class="hidden">
+          <label for="second_resolution_preset">Second resolution</label>
+          <select id="second_resolution_preset" name="second_resolution_preset">
+            {% for val, label in resolution_presets %}
+              <option value="{{ val }}" {% if values.get('second_resolution_preset') == val %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+            <option value="custom" {% if values.get('second_resolution_preset') == 'custom' %}selected{% endif %}>Custom&hellip;</option>
+          </select>
+          <div class="row hidden" id="secondCustomResolutionRow">
+            <div>
+              <label for="second_custom_width">Width</label>
+              <input type="number" id="second_custom_width" name="second_custom_width" min="1" value="{{ values.get('second_custom_width', '') }}">
+            </div>
+            <div>
+              <label for="second_custom_height">Height</label>
+              <input type="number" id="second_custom_height" name="second_custom_height" min="1" value="{{ values.get('second_custom_height', '') }}">
+            </div>
+          </div>
+          <label for="second_bitrate_preset">Second bitrate</label>
+          <select id="second_bitrate_preset" name="second_bitrate_preset">
+            <option value="" {% if values.get('second_bitrate_preset', '') == '' %}selected{% endif %}>Same as main bitrate</option>
+            {% for b in bitrate_presets %}
+              <option value="{{ b }}" {% if values.get('second_bitrate_preset') == b %}selected{% endif %}>{{ b }}</option>
+            {% endfor %}
+            <option value="custom" {% if values.get('second_bitrate_preset') == 'custom' %}selected{% endif %}>Custom&hellip;</option>
+          </select>
+          <input type="text" class="hidden" id="second_custom_bitrate" name="second_custom_bitrate" placeholder="e.g. 10M" value="{{ values.get('second_custom_bitrate', '') }}">
+          <p class="hint">Both resolutions upload and deliver together from a single Approve click.</p>
+
+          <label for="second_overlay_file" style="margin-top:1rem;">Second overlay image (optional)</label>
+          <input type="file" id="second_overlay_file" name="second_overlay_file" accept="image/*">
+          <p class="hint">A separate overlay for the second resolution (e.g. a horizontal logo for a 16:9 cut). Leave empty for no overlay on the second export.</p>
+
+          <label for="second_overlay_position">Position</label>
+          <select id="second_overlay_position" name="second_overlay_position">
+            {% for pos in overlay_positions %}
+              <option value="{{ pos }}" {% if values.get('second_overlay_position', 'full') == pos %}selected{% endif %}>{{ pos }}</option>
+            {% endfor %}
+          </select>
+
+          <label for="second_overlay_scale">Size (% of frame width) — <span class="slider-value" id="second_overlay_scale_value">{{ values.get('second_overlay_scale', 30) }}</span>%</label>
+          <input type="range" id="second_overlay_scale" name="second_overlay_scale" min="1" max="100" value="{{ values.get('second_overlay_scale', 30) }}">
+
+          <div id="secondCustomPositionRow" class="hidden">
+            <label for="second_overlay_x">Horizontal position — <span class="slider-value" id="second_overlay_x_value">{{ values.get('second_overlay_x', 50) }}</span>%</label>
+            <input type="range" id="second_overlay_x" name="second_overlay_x" min="0" max="100" value="{{ values.get('second_overlay_x', 50) }}">
+            <label for="second_overlay_y">Vertical position — <span class="slider-value" id="second_overlay_y_value">{{ values.get('second_overlay_y', 50) }}</span>%</label>
+            <input type="range" id="second_overlay_y" name="second_overlay_y" min="0" max="100" value="{{ values.get('second_overlay_y', 50) }}">
+          </div>
+        </div>
       </fieldset>
 
       <fieldset>
-        <legend>Overlay graphic</legend>
+        <legend>Overlay graphic (optional)</legend>
         <label for="overlay_file">Overlay image</label>
-        <input type="file" id="overlay_file" name="overlay_file" accept="image/*" required>
+        <input type="file" id="overlay_file" name="overlay_file" accept="image/*">
+        <p class="hint">Leave empty for no overlay — the clip is exported clean.</p>
 
         <label for="overlay_position">Position</label>
         <select id="overlay_position" name="overlay_position">
@@ -137,6 +232,43 @@
         </div>
       </fieldset>
 
+      <fieldset>
+        <legend>Soundtrack (optional)</legend>
+        <label for="soundtrack_choice">Soundtrack</label>
+        <select id="soundtrack_choice" name="soundtrack_choice">
+          <option value="__none__" {% if values.get('soundtrack_choice', '__none__') == '__none__' %}selected{% endif %}>None</option>
+          <option value="__upload__" {% if values.get('soundtrack_choice') == '__upload__' %}selected{% endif %}>Upload new file&hellip;</option>
+          {% for name in existing_soundtracks %}
+            <option value="{{ name }}" {% if values.get('soundtrack_choice') == name %}selected{% endif %}>{{ name }}</option>
+          {% endfor %}
+        </select>
+        <input type="file" class="hidden" id="soundtrack_file" name="soundtrack_file" accept="audio/*">
+
+        <div class="row">
+          <div>
+            <label for="soundtrack_volume_db">Soundtrack volume (dB)</label>
+            <input type="number" id="soundtrack_volume_db" name="soundtrack_volume_db" step="0.5" placeholder="0" value="{{ values.get('soundtrack_volume_db', '') }}">
+          </div>
+          <div>
+            <label for="original_volume_db">Original audio volume (dB)</label>
+            <input type="number" id="original_volume_db" name="original_volume_db" step="0.5" placeholder="0" value="{{ values.get('original_volume_db', '') }}">
+          </div>
+        </div>
+        <p class="hint">-60 to +12 dB. 0 = unchanged; a very low value (e.g. -60) effectively mutes that side.</p>
+
+        <div class="row">
+          <div>
+            <label for="soundtrack_trim_start">Soundtrack trim start</label>
+            <input type="text" id="soundtrack_trim_start" name="soundtrack_trim_start" placeholder="00:00:00" value="{{ values.get('soundtrack_trim_start', '') }}">
+          </div>
+          <div>
+            <label for="soundtrack_trim_end">Soundtrack trim end</label>
+            <input type="text" id="soundtrack_trim_end" name="soundtrack_trim_end" placeholder="00:00:30" value="{{ values.get('soundtrack_trim_end', '') }}">
+          </div>
+        </div>
+        <p class="hint">Optional — use just a portion of the track. Leave blank to use it from the start / play to its end.</p>
+      </fieldset>
+
       <button type="submit">Create Project</button>
     </form>
 
@@ -145,6 +277,13 @@
         <img id="previewOverlay" style="display:none;">
       </div>
       <p class="preview-caption">Approximate preview — actual export composites at full resolution.</p>
+
+      <div id="secondPreviewWrap" class="hidden" style="margin-top:1.5rem;">
+        <div class="preview-frame" id="secondPreviewFrame">
+          <img id="secondPreviewOverlay" style="display:none;">
+        </div>
+        <p class="preview-caption">Second resolution preview.</p>
+      </div>
     </div>
   </div>
 
@@ -174,21 +313,52 @@
   const overlayXValue = document.getElementById('overlay_x_value');
   const overlayYValue = document.getElementById('overlay_y_value');
 
+  const secondResolutionEnabled = document.getElementById('second_resolution_enabled');
+  const secondResolutionRow = document.getElementById('secondResolutionRow');
+  const secondResolutionPreset = document.getElementById('second_resolution_preset');
+  const secondCustomResolutionRow = document.getElementById('secondCustomResolutionRow');
+  const secondCustomWidth = document.getElementById('second_custom_width');
+  const secondCustomHeight = document.getElementById('second_custom_height');
+  const secondBitratePreset = document.getElementById('second_bitrate_preset');
+  const secondCustomBitrate = document.getElementById('second_custom_bitrate');
+
+  const secondOverlayFile = document.getElementById('second_overlay_file');
+  const secondOverlayPosition = document.getElementById('second_overlay_position');
+  const secondOverlayScale = document.getElementById('second_overlay_scale');
+  const secondOverlayScaleValue = document.getElementById('second_overlay_scale_value');
+  const secondCustomPositionRow = document.getElementById('secondCustomPositionRow');
+  const secondOverlayX = document.getElementById('second_overlay_x');
+  const secondOverlayY = document.getElementById('second_overlay_y');
+  const secondOverlayXValue = document.getElementById('second_overlay_x_value');
+  const secondOverlayYValue = document.getElementById('second_overlay_y_value');
+
+  const soundtrackChoice = document.getElementById('soundtrack_choice');
+  const soundtrackFile = document.getElementById('soundtrack_file');
+
   const previewFrame = document.getElementById('previewFrame');
   const previewOverlay = document.getElementById('previewOverlay');
+  const secondPreviewWrap = document.getElementById('secondPreviewWrap');
+  const secondPreviewFrame = document.getElementById('secondPreviewFrame');
+  const secondPreviewOverlay = document.getElementById('secondPreviewOverlay');
 
   const FRAME_W = 260;
   const MARGIN_REAL_PX = 20;
 
-  function targetResolution() {
-    if (resolutionPreset.value === 'custom') {
-      const w = parseInt(customWidth.value, 10);
-      const h = parseInt(customHeight.value, 10);
+  function resFromControls(preset, cw, ch, fallback) {
+    if (preset.value === 'custom') {
+      const w = parseInt(cw.value, 10);
+      const h = parseInt(ch.value, 10);
       if (w > 0 && h > 0) return [w, h];
-      return [1080, 1920];
+      return fallback;
     }
-    const [w, h] = resolutionPreset.value.split('x').map(Number);
-    return [w, h];
+    const parts = preset.value.split('x').map(Number);
+    return (parts.length === 2 && parts[0] > 0) ? parts : fallback;
+  }
+  function targetResolution() {
+    return resFromControls(resolutionPreset, customWidth, customHeight, [1080, 1920]);
+  }
+  function secondResolution() {
+    return resFromControls(secondResolutionPreset, secondCustomWidth, secondCustomHeight, [1920, 1080]);
   }
 
   function toggleVisibility() {
@@ -197,76 +367,129 @@
     customBitrate.classList.toggle('hidden', bitratePreset.value !== 'custom');
     customPositionRow.classList.toggle('hidden', overlayPosition.value !== 'custom');
     recipientEmailLabel.textContent = deliveryMode.value === 'qr_only' ? 'Client email (optional)' : 'Client email';
+    secondResolutionRow.classList.toggle('hidden', !secondResolutionEnabled.checked);
+    secondCustomResolutionRow.classList.toggle('hidden', secondResolutionPreset.value !== 'custom');
+    secondCustomBitrate.classList.toggle('hidden', secondBitratePreset.value !== 'custom');
+    secondCustomPositionRow.classList.toggle('hidden', secondOverlayPosition.value !== 'custom');
+    secondPreviewWrap.classList.toggle('hidden', !secondResolutionEnabled.checked);
+    soundtrackFile.classList.toggle('hidden', soundtrackChoice.value !== '__upload__');
   }
 
-  function updatePreview() {
-    const [targetW, targetH] = targetResolution();
+  // Generic preview renderer — sizes the frame to the target resolution's
+  // aspect ratio and places the overlay image per its position/scale/x/y.
+  function renderPreview(frameEl, imgEl, res, posEl, scaleEl, xEl, yEl) {
+    const [targetW, targetH] = res;
     const frameH = FRAME_W * (targetH / targetW);
-    previewFrame.style.width = FRAME_W + 'px';
-    previewFrame.style.height = frameH + 'px';
+    frameEl.style.width = FRAME_W + 'px';
+    frameEl.style.height = frameH + 'px';
+    if (!imgEl.src) { imgEl.style.display = 'none'; return; }
 
-    if (!previewOverlay.src) return;
-
-    const scalePct = parseFloat(overlayScale.value) || 30;
+    const scalePct = parseFloat(scaleEl.value) || 30;
     const overlayW = (scalePct / 100) * FRAME_W;
-    const naturalRatio = previewOverlay.naturalWidth
-      ? previewOverlay.naturalHeight / previewOverlay.naturalWidth
-      : 1;
+    const naturalRatio = imgEl.naturalWidth ? imgEl.naturalHeight / imgEl.naturalWidth : 1;
     const overlayH = overlayW * naturalRatio;
     const marginPreview = MARGIN_REAL_PX * (FRAME_W / targetW);
 
     let left = 0, top = 0;
-    const pos = overlayPosition.value;
-    if (pos === 'full') {
-      left = 0; top = 0;
-    } else if (pos === 'top-left') {
-      left = marginPreview; top = marginPreview;
-    } else if (pos === 'top-right') {
-      left = FRAME_W - overlayW - marginPreview; top = marginPreview;
-    } else if (pos === 'bottom-left') {
-      left = marginPreview; top = frameH - overlayH - marginPreview;
-    } else if (pos === 'bottom-right') {
-      left = FRAME_W - overlayW - marginPreview; top = frameH - overlayH - marginPreview;
-    } else if (pos === 'custom') {
-      left = (parseFloat(overlayX.value) / 100) * FRAME_W;
-      top = (parseFloat(overlayY.value) / 100) * frameH;
-    }
+    const pos = posEl.value;
+    if (pos === 'full') { left = 0; top = 0; }
+    else if (pos === 'top-left') { left = marginPreview; top = marginPreview; }
+    else if (pos === 'top-right') { left = FRAME_W - overlayW - marginPreview; top = marginPreview; }
+    else if (pos === 'bottom-left') { left = marginPreview; top = frameH - overlayH - marginPreview; }
+    else if (pos === 'bottom-right') { left = FRAME_W - overlayW - marginPreview; top = frameH - overlayH - marginPreview; }
+    else if (pos === 'custom') { left = (parseFloat(xEl.value) / 100) * FRAME_W; top = (parseFloat(yEl.value) / 100) * frameH; }
 
-    previewOverlay.style.width = overlayW + 'px';
-    previewOverlay.style.height = 'auto';
-    previewOverlay.style.left = left + 'px';
-    previewOverlay.style.top = top + 'px';
-    previewOverlay.style.display = 'block';
+    imgEl.style.width = overlayW + 'px';
+    imgEl.style.height = 'auto';
+    imgEl.style.left = left + 'px';
+    imgEl.style.top = top + 'px';
+    imgEl.style.display = 'block';
   }
 
-  overlayFile.addEventListener('change', function () {
-    const file = overlayFile.files[0];
-    if (!file) return;
-    previewOverlay.onload = updatePreview;
-    previewOverlay.src = URL.createObjectURL(file);
-  });
+  function updatePreview() {
+    renderPreview(previewFrame, previewOverlay, targetResolution(), overlayPosition, overlayScale, overlayX, overlayY);
+    if (secondResolutionEnabled.checked) {
+      renderPreview(secondPreviewFrame, secondPreviewOverlay, secondResolution(), secondOverlayPosition, secondOverlayScale, secondOverlayX, secondOverlayY);
+    }
+  }
 
-  overlayScale.addEventListener('input', function () {
-    overlayScaleValue.textContent = overlayScale.value;
-    updatePreview();
-  });
-  overlayX.addEventListener('input', function () {
-    overlayXValue.textContent = overlayX.value;
-    updatePreview();
-  });
-  overlayY.addEventListener('input', function () {
-    overlayYValue.textContent = overlayY.value;
-    updatePreview();
-  });
+  function wireOverlayFile(fileEl, imgEl) {
+    fileEl.addEventListener('change', function () {
+      const file = fileEl.files[0];
+      if (!file) { imgEl.src = ''; updatePreview(); return; }
+      imgEl.onload = updatePreview;
+      imgEl.src = URL.createObjectURL(file);
+    });
+  }
+  wireOverlayFile(overlayFile, previewOverlay);
+  wireOverlayFile(secondOverlayFile, secondPreviewOverlay);
 
-  [resolutionPreset, customWidth, customHeight, fpsPreset, bitratePreset, overlayPosition, deliveryMode].forEach(function (el) {
+  function wireSlider(sliderEl, valueEl) {
+    sliderEl.addEventListener('input', function () {
+      valueEl.textContent = sliderEl.value;
+      updatePreview();
+    });
+  }
+  wireSlider(overlayScale, overlayScaleValue);
+  wireSlider(overlayX, overlayXValue);
+  wireSlider(overlayY, overlayYValue);
+  wireSlider(secondOverlayScale, secondOverlayScaleValue);
+  wireSlider(secondOverlayX, secondOverlayXValue);
+  wireSlider(secondOverlayY, secondOverlayYValue);
+
+  [resolutionPreset, customWidth, customHeight, fpsPreset, bitratePreset, overlayPosition, deliveryMode,
+   secondResolutionEnabled, secondResolutionPreset, secondCustomWidth, secondCustomHeight,
+   secondBitratePreset, secondOverlayPosition, soundtrackChoice].forEach(function (el) {
     el.addEventListener('change', function () {
       toggleVisibility();
       updatePreview();
     });
   });
-  [customWidth, customHeight].forEach(function (el) {
+  [customWidth, customHeight, secondCustomWidth, secondCustomHeight].forEach(function (el) {
     el.addEventListener('input', updatePreview);
+  });
+
+  // --- Footage source folder browser ---
+  const sourceDirInput = document.getElementById('source_dir');
+  const browseButton = document.getElementById('browseButton');
+  const folderBrowser = document.getElementById('folderBrowser');
+  const folderBrowserPath = document.getElementById('folderBrowserPath');
+  const folderBrowserList = document.getElementById('folderBrowserList');
+  const useThisFolder = document.getElementById('useThisFolder');
+  let browserCurrentPath = null;
+
+  function loadFolder(path) {
+    const qs = path ? ('?path=' + encodeURIComponent(path)) : '';
+    fetch('/browse' + qs)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        browserCurrentPath = data.path;
+        folderBrowserPath.textContent = data.path;
+        folderBrowserList.innerHTML = '';
+        if (data.parent) {
+          const up = document.createElement('li');
+          up.textContent = '.. (up)';
+          up.addEventListener('click', function () { loadFolder(data.parent); });
+          folderBrowserList.appendChild(up);
+        }
+        data.folders.forEach(function (name) {
+          const li = document.createElement('li');
+          li.textContent = name;
+          li.addEventListener('click', function () {
+            loadFolder(data.path + (data.path.endsWith('/') ? '' : '/') + name);
+          });
+          folderBrowserList.appendChild(li);
+        });
+      });
+  }
+
+  browseButton.addEventListener('click', function () {
+    const isOpen = folderBrowser.classList.toggle('open');
+    if (isOpen) loadFolder(sourceDirInput.value || null);
+  });
+  useThisFolder.addEventListener('click', function () {
+    if (browserCurrentPath) sourceDirInput.value = browserCurrentPath;
+    folderBrowser.classList.remove('open');
   });
 
   toggleVisibility();

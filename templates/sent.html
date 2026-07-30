@@ -3,11 +3,12 @@
 <head>
 <meta charset="utf-8">
 <title>Glambot — Sent</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  body { font-family: -apple-system, sans-serif; max-width: 500px; margin: 3rem auto; text-align: center; color: #222; }
-  img { margin: 1.5rem 0; }
-  a.back { display: inline-block; margin-top: 2rem; }
-  .link { word-break: break-all; font-size: .85rem; color: #555; }
+  body { max-width: 480px; margin: 4rem auto; padding: 0 1.5rem 3rem; text-align: center; }
+  img { margin: 1.5rem 0; border-radius: var(--radius); }
+  a.back { margin-top: 1.5rem; }
+  .link { word-break: break-all; font-size: .85rem; color: var(--text-secondary); }
 </style>
 </head>
 <body>
@@ -16,6 +17,11 @@
   <p>Scan to open on another device:</p>
   <img src="{{ qr_data_uri }}" alt="QR code for download link" width="220" height="220">
   <p class="link"><a href="{{ link }}" target="_blank">{{ link }}</a></p>
+  {% if link2 %}
+  <p>Second version:</p>
+  <img src="{{ qr_data_uri2 }}" alt="QR code for second download link" width="220" height="220">
+  <p class="link"><a href="{{ link2 }}" target="_blank">{{ link2 }}</a></p>
+  {% endif %}
   <a class="back" href="{{ url_for('index') }}">&larr; Back to review queue</a>
 </body>
 </html>

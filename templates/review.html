@@ -2,41 +2,106 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Glambot — Review &amp; Approve</title>
+<title>Glambot Automation</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #222; }
-  h1 { font-size: 1.4rem; }
-  h2 { font-size: 1.1rem; margin-top: 2.5rem; color: #555; }
-  .flash { padding: .6rem 1rem; border-radius: 6px; margin-bottom: 1rem; }
-  .flash.error { background: #fdecea; color: #a4262c; }
-  .flash.info { background: #eaf6ea; color: #1a6e2a; }
-  .card { border: 1px solid #ddd; border-radius: 10px; padding: 1rem; margin-bottom: 1.5rem; }
-  .card video { width: 100%; max-height: 360px; background: #000; border-radius: 6px; }
-  .meta { color: #666; font-size: .85rem; margin: .3rem 0 1rem; }
-  label { display: block; font-weight: 600; margin-top: .8rem; font-size: .85rem; }
-  input[type=email], input[type=text] { width: 100%; padding: .5rem; box-sizing: border-box; }
-  textarea { width: 100%; padding: .5rem; box-sizing: border-box; min-height: 140px; font-family: inherit; }
-  .actions { margin-top: 1rem; display: flex; gap: .75rem; }
-  button { padding: .6rem 1.2rem; border-radius: 6px; border: none; font-size: .95rem; cursor: pointer; }
-  .approve { background: #1a6e2a; color: #fff; }
-  .reject { background: #a4262c; color: #fff; }
-  .hint { color: #888; font-size: .78rem; }
-  .empty { color: #888; }
-  select.delivery-mode-select { width: 100%; padding: .5rem; box-sizing: border-box; margin-top: .3rem; }
-  .error-list, .sent-list { font-size: .85rem; color: #555; }
-  .error-list li { color: #a4262c; }
+  .banner { width: 100%; max-height: 260px; object-fit: cover; border-radius: var(--radius-lg); margin: 1rem 0 1.5rem; display: block; }
+  .shared-folders { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.25rem 1.5rem; margin-bottom: 2rem; }
+  .shared-folder { padding: .6rem 0; border-bottom: 1px solid var(--border); }
+  .shared-folder:last-child { border-bottom: none; }
+  .shared-folder .path { font-size: .82rem; color: var(--text-secondary); margin-bottom: .5rem; word-break: break-all; }
+  .shared-folder ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .6rem; }
+  .shared-folder li { display: flex; align-items: center; gap: .5rem; background: var(--bg-elevated-2); border-radius: 980px; padding: .4rem .5rem .4rem .9rem; font-size: .85rem; }
+  .shared-folder li.active { background: rgba(0, 113, 227, 0.18); color: var(--accent); font-weight: 600; }
+  .shared-folder li form { margin: 0; }
+  .shared-folder li button { margin: 0; padding: .3rem .8rem; font-size: .78rem; }
+  .processing { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.25rem 1.5rem; margin-bottom: 2rem; }
+  .proc-item { padding: .5rem 0; }
+  .proc-item .proc-label { font-size: .9rem; margin-bottom: .4rem; }
+  .proc-item .proc-label .pct { color: var(--accent); font-weight: 600; float: right; }
+  .bar { height: 8px; background: var(--bg-elevated-2); border-radius: 980px; overflow: hidden; }
+  .bar > span { display: block; height: 100%; background: var(--accent); border-radius: 980px; transition: width .4s ease; }
+  .bar.indeterminate > span { width: 35% !important; animation: slide 1.2s ease-in-out infinite; }
+  @keyframes slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+  .log-toggle { margin-top: 2.5rem; }
+  .log-toggle button { margin-top: 0; }
+  .log-body { margin-top: 1rem; }
+  .auto-failed { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.25rem 1.5rem; margin-bottom: 2rem; }
+  .auto-failed .af-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .6rem 0; border-bottom: 1px solid var(--border); }
+  .auto-failed .af-row:last-child { border-bottom: none; }
+  .auto-failed .af-info { font-size: .88rem; }
+  .auto-failed .af-info .af-err { color: #ff8a80; font-size: .8rem; margin-top: .2rem; }
+  .auto-failed .af-row form { margin: 0; }
+  .auto-failed .af-row button { margin: 0; }
 </style>
 </head>
 <body>
-  <h1>Glambot — Review &amp; Approve</h1>
+  <h1>Glambot Automation</h1>
+  <img class="banner" src="{{ url_for('static', filename='glambot-banner.jpg') }}" alt="Glambot">
   <p class="hint">Nothing is uploaded or emailed until you click Approve on a clip below.</p>
-  <p><a href="{{ url_for('new_project_form') }}">+ New Project</a></p>
+  <p><a href="{{ url_for('new_project_form') }}">+ New Project</a>
+     &nbsp;·&nbsp; <a href="{{ url_for('edited_clips') }}">Email a delivered clip</a></p>
 
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, message in messages %}
       <div class="flash {{ category }}">{{ message }}</div>
     {% endfor %}
   {% endwith %}
+
+  {% if shared_folders %}
+    <div class="shared-folders">
+      <h2 style="margin-top:0">Shared footage folders</h2>
+      {% for sf in shared_folders %}
+        <div class="shared-folder">
+          <div class="path"><code>{{ sf.folder }}</code></div>
+          <ul>
+            {% for p in sf.projects %}
+              <li class="{{ 'active' if p == sf.active else '' }}">
+                {{ p }}{% if p == sf.active %} · active{% endif %}
+                {% if p != sf.active %}
+                  <form method="post" action="{{ url_for('set_active_folder_project') }}">
+                    <input type="hidden" name="folder" value="{{ sf.folder }}">
+                    <input type="hidden" name="project" value="{{ p }}">
+                    <button type="submit" class="secondary">Make active</button>
+                  </form>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <div class="processing" id="processingSection" style="{{ '' if processing_jobs else 'display:none' }}">
+    <h2 style="margin-top:0">Now processing</h2>
+    <div id="processingList">
+      {% for job in processing_jobs %}
+        <div class="proc-item" data-job="{{ job.id }}">
+          <div class="proc-label">{{ job.project }} / {{ job.filename }}
+            <span class="pct">{{ (job.progress ~ '%') if job.progress is not none else '' }}</span></div>
+          <div class="bar {{ 'indeterminate' if job.progress is none else '' }}"><span style="width: {{ job.progress or 0 }}%"></span></div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  {% if auto_failed %}
+    <div class="auto-failed">
+      <h2 style="margin-top:0">Auto-delivery needs attention</h2>
+      {% for job in auto_failed %}
+        <div class="af-row">
+          <div class="af-info">
+            {{ job.project }} / {{ job.filename }}
+            <div class="af-err">{{ job.error }}</div>
+          </div>
+          <form method="post" action="{{ url_for('retry_delivery', job_id=job.id) }}">
+            <button type="submit">Retry</button>
+          </form>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
 
   {% if not cards %}
     <p class="empty">No clips waiting for review right now.</p>
@@ -103,14 +168,36 @@
     </ul>
   {% endif %}
 
-  {% if sent_jobs %}
-    <h2>Recently sent</h2>
-    <ul class="sent-list">
-      {% for job in sent_jobs %}
-        <li>{{ job.project }} / {{ job.filename }} → {{ job.recipient_email or 'QR kiosk' }} ({{ job.sent_at }})</li>
-      {% endfor %}
-    </ul>
-  {% endif %}
+  <div class="log-toggle">
+    <button type="button" class="secondary" data-log="output">Show output log</button>
+    <div class="log-body hidden" id="log-output">
+      {% if output_log %}
+        <ul class="sent-list">
+          {% for job in output_log %}
+            <li>{{ job.project }} / {{ job.filename }} — {{ job.status }} ({{ job.updated_at }})</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="empty">No clips processed yet.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="log-toggle">
+    <button type="button" class="secondary" data-log="email">Show email sent log</button>
+    <div class="log-body hidden" id="log-email">
+      {% if email_log %}
+        <ul class="sent-list">
+          {% for job in email_log %}
+            <li>{{ job.project }} / {{ job.filename }} → {{ job.recipient_email }} ({{ job.sent_at }})
+              {% if job.drive_link %}· <a href="{{ job.drive_link }}" target="_blank">link</a>{% endif %}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="empty">No email deliveries yet.</p>
+      {% endif %}
+    </div>
+  </div>
 
   <script>
     document.querySelectorAll('.approve-form').forEach(function (form) {
@@ -122,6 +209,51 @@
       select.addEventListener('change', sync);
       sync();
     });
+
+    // Collapsible logs, state remembered per-log in localStorage.
+    document.querySelectorAll('.log-toggle button').forEach(function (btn) {
+      var key = 'glambot-log-' + btn.dataset.log;
+      var body = document.getElementById('log-' + btn.dataset.log);
+      var noun = btn.dataset.log === 'output' ? 'output log' : 'email sent log';
+      function render(open) {
+        body.classList.toggle('hidden', !open);
+        btn.textContent = (open ? 'Hide ' : 'Show ') + noun;
+      }
+      render(localStorage.getItem(key) === 'open');
+      btn.addEventListener('click', function () {
+        var open = body.classList.contains('hidden');
+        localStorage.setItem(key, open ? 'open' : 'closed');
+        render(open);
+      });
+    });
+
+    // Live progress polling for clips processing in the background.
+    (function () {
+      var section = document.getElementById('processingSection');
+      var list = document.getElementById('processingList');
+      var seen = new Set(Array.from(list.querySelectorAll('.proc-item')).map(function (el) { return el.dataset.job; }));
+      function poll() {
+        fetch('/status', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (jobs) {
+          if (!jobs.length) {
+            section.style.display = 'none';
+            // The whole batch finished → reload once to surface the new
+            // ready cards / logs / monitoring results.
+            if (seen.size) { seen = new Set(); location.reload(); return; }
+            return;
+          }
+          section.style.display = '';
+          list.innerHTML = jobs.map(function (j) {
+            return '<div class="proc-item" data-job="' + j.id + '">' +
+              '<div class="proc-label">' + j.project + ' / ' + j.filename +
+              '<span class="pct">' + j.progress + '%</span></div>' +
+              '<div class="bar"><span style="width:' + j.progress + '%"></span></div></div>';
+          }).join('');
+          seen = new Set(jobs.map(function (j) { return String(j.id); }));
+        }).catch(function () {});
+      }
+      setInterval(poll, 1000);
+      poll();
+    })();
   </script>
 </body>
 </html>

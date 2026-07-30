@@ -42,11 +42,24 @@ CREATE TABLE IF NOT EXISTS jobs (
 _NEW_COLUMNS = [
     ("delivery_mode", "TEXT NOT NULL DEFAULT 'email'"),
     ("thumbnail_path", "TEXT"),
+    ("secondary_output_path", "TEXT"),
+    ("secondary_drive_link", "TEXT"),
+    ("progress", "INTEGER"),
 ]
+
+
+_FOLDER_OWNERSHIP_SCHEMA = """
+CREATE TABLE IF NOT EXISTS folder_ownership (
+    folder_path TEXT PRIMARY KEY,
+    active_project TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_SCHEMA)
+    conn.execute(_FOLDER_OWNERSHIP_SCHEMA)
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
     for name, ddl in _NEW_COLUMNS:
         if name not in existing:
@@ -75,6 +88,9 @@ class Job:
     sent_at: Optional[str]
     delivery_mode: str = "email"
     thumbnail_path: Optional[str] = None
+    secondary_output_path: Optional[str] = None
+    secondary_drive_link: Optional[str] = None
+    progress: Optional[int] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Job":
@@ -154,14 +170,24 @@ class JobStore:
         return self.get_job(job_id)
 
     def mark_ready(self, job_id: int, output_path: str,
-                   thumbnail_path: Optional[str] = None) -> Job:
-        fields: dict[str, Any] = dict(status="ready", output_path=output_path, error=None)
+                   thumbnail_path: Optional[str] = None,
+                   secondary_output_path: Optional[str] = None) -> Job:
+        fields: dict[str, Any] = dict(status="ready", output_path=output_path, error=None, progress=None)
         if thumbnail_path is not None:
             fields["thumbnail_path"] = thumbnail_path
+        if secondary_output_path is not None:
+            fields["secondary_output_path"] = secondary_output_path
         return self.update_job(job_id, **fields)
 
     def mark_error(self, job_id: int, error: str) -> Job:
-        return self.update_job(job_id, status="error", error=error)
+        return self.update_job(job_id, status="error", error=error, progress=None)
+
+    def set_progress(self, job_id: int, pct: int) -> None:
+        """Lightweight progress write (called many times during a render).
+        Doesn't go through update_job so it stays cheap and doesn't churn
+        the rest of the row."""
+        with self._connect() as conn:
+            conn.execute("UPDATE jobs SET progress = ? WHERE id = ?", (pct, job_id))
 
     def mark_rejected(self, job_id: int) -> Job:
         return self.update_job(job_id, status="rejected")
@@ -169,7 +195,9 @@ class JobStore:
     def mark_sent(self, job_id: int, drive_link: str, output_path: str,
                    recipient_email: Optional[str] = None,
                    delivery_mode: Optional[str] = None,
-                   thumbnail_path: Optional[str] = None) -> Job:
+                   thumbnail_path: Optional[str] = None,
+                   secondary_output_path: Optional[str] = None,
+                   secondary_drive_link: Optional[str] = None) -> Job:
         fields: dict[str, Any] = dict(
             status="sent",
             drive_link=drive_link,
@@ -182,4 +210,26 @@ class JobStore:
             fields["delivery_mode"] = delivery_mode
         if thumbnail_path is not None:
             fields["thumbnail_path"] = thumbnail_path
+        if secondary_output_path is not None:
+            fields["secondary_output_path"] = secondary_output_path
+        if secondary_drive_link is not None:
+            fields["secondary_drive_link"] = secondary_drive_link
         return self.update_job(job_id, **fields)
+
+    def get_active_project(self, folder_path: str) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT active_project FROM folder_ownership WHERE folder_path = ?", (folder_path,)
+            ).fetchone()
+        return row["active_project"] if row else None
+
+    def set_active_project(self, folder_path: str, project: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO folder_ownership (folder_path, active_project, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(folder_path) DO UPDATE SET
+                       active_project = excluded.active_project,
+                       updated_at = excluded.updated_at""",
+                (folder_path, project, _now()),
+            )

@@ -2,6 +2,8 @@
 inbox/
 overlays/
 !overlays/.gitkeep
+soundtracks/
+!soundtracks/.gitkeep
 *.sqlite
 *.sqlite3
 .env

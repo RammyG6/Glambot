@@ -1,10 +1,19 @@
-"""Watches the inbox folder tree for newly saved footage and runs it through
-the processor as soon as the file has finished copying and a valid
+"""Watches each project's footage folder for newly saved footage and runs it
+through the processor as soon as the file has finished copying and a valid
 config.json sits next to it.
+
+Each project's `config.json` always lives at `inbox_dir/<project>/`, but the
+folder the *raw footage* is watched from is configurable per project (see
+`ProjectConfig.source_dir`) — it may be an arbitrary folder elsewhere on
+disk (e.g. an SD-card import folder), not necessarily `inbox_dir/<project>`
+itself. A periodic sync pass keeps the set of watched folders in step with
+each project's current config, so new projects/changed source folders are
+picked up without a restart.
 """
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -15,7 +24,9 @@ from watchdog.observers import Observer
 
 from .config import ConfigError, load_config
 from .db import JobStore
+from .folders import group_by_folder, project_watch_dirs
 from .processor import (
+    EDITED_FOOTAGES_SUBDIR,
     OUTPUT_SUBDIR,
     QR_APPROVED_SUBDIR,
     QR_DOWNLOAD_SUBDIR,
@@ -25,7 +36,8 @@ from .processor import (
     process_job,
 )
 
-_EXCLUDED_SUBDIRS = {OUTPUT_SUBDIR, SENT_SUBDIR, QR_OUTPUT_SUBDIR, QR_APPROVED_SUBDIR, QR_DOWNLOAD_SUBDIR}
+_EXCLUDED_SUBDIRS = {OUTPUT_SUBDIR, SENT_SUBDIR, QR_OUTPUT_SUBDIR, QR_APPROVED_SUBDIR,
+                     QR_DOWNLOAD_SUBDIR, EDITED_FOOTAGES_SUBDIR}
 
 logger = logging.getLogger(__name__)
 
@@ -46,28 +58,39 @@ class _Handler(FileSystemEventHandler):
 
 
 class InboxWatcher:
-    """Watches `inbox_dir` for new footage in project subfolders and enqueues
-    a processing job once each file's size has stopped changing (i.e. the
+    """Watches every project's effective footage folder and enqueues a
+    processing job once each new file's size has stopped changing (i.e. the
     copy/save has finished)."""
 
     def __init__(self, inbox_dir: Path, store: JobStore,
-                 settle_seconds: float = 2.0, poll_interval: float = 0.5):
+                 settle_seconds: float = 2.0, poll_interval: float = 0.5,
+                 watch_sync_interval: float = 10.0):
         self.inbox_dir = Path(inbox_dir)
         self.store = store
         self.settle_seconds = settle_seconds
         self.poll_interval = poll_interval
+        self.watch_sync_interval = watch_sync_interval
         self._queue: Queue[Path] = Queue()
-        self._seen: set[str] = set()
+        # Dedup key is (resolved_path, active_project): a file is processed
+        # once per project that's active for its folder, so switching the
+        # active project (or a stale job left by a since-deleted project)
+        # correctly reprocesses the file under the now-active project.
+        self._seen: set[tuple[str, str]] = set()
         self._observer = Observer()
+        self._handler = _Handler(self)
+        self._project_watch_dirs: dict[str, Path] = {}
+        # watchdog keeps ONE underlying emitter per filesystem path, so watches
+        # are tracked by resolved path string (not by project) — otherwise
+        # unscheduling one project's watch on a shared folder tears down the
+        # emitter the newly-active project still depends on.
+        self._watched_paths: dict[str, object] = {}
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._stop = threading.Event()
 
     def start(self) -> None:
         self.inbox_dir.mkdir(parents=True, exist_ok=True)
         self._recover_stuck_jobs()
-        self._scan_existing()
-        handler = _Handler(self)
-        self._observer.schedule(handler, str(self.inbox_dir), recursive=True)
+        self._sync_watches()
         self._observer.start()
         self._worker_thread.start()
         logger.info("Watching %s for new footage", self.inbox_dir)
@@ -77,6 +100,80 @@ class InboxWatcher:
         self._observer.stop()
         self._observer.join()
         self._worker_thread.join(timeout=5)
+
+    def _sync_watches(self) -> None:
+        """Re-read every project's config.json, keep the set of watched
+        folders in step with it, and scan every active folder for footage.
+
+        When two or more projects point at the same folder, only one — the
+        "active" one, persisted in `folder_ownership` so it stays stable
+        across restarts/syncs — receives new footage (see the "Shared footage
+        folders" UI in app.py). watchdog watches are managed by *path*, not by
+        project: a shared folder keeps its single live watch no matter which
+        project is active, so switching the active project never leaves the
+        folder "deaf".
+
+        Runs on startup and every ~watch_sync_interval seconds. The
+        per-folder scan at the end is the reliable detection mechanism —
+        idempotent (consider() dedups via `_seen`/`find_by_source`) and cheap,
+        so it also self-heals any live FS event that was missed."""
+        candidates = project_watch_dirs(self.inbox_dir)
+        groups = group_by_folder(candidates)
+
+        current: dict[str, Path] = {}
+        for folder, projects in groups.items():
+            if len(projects) == 1:
+                current[projects[0]] = folder
+                continue
+            folder_key = str(folder)
+            active = self.store.get_active_project(folder_key)
+            if active not in projects:
+                # First time this collision is seen, or the previously
+                # active project no longer claims this folder — pick a
+                # stable default and persist it so it doesn't flip on
+                # every sync.
+                active = projects[0]
+                self.store.set_active_project(folder_key, active)
+            current[active] = folder
+
+        # Publish the mapping BEFORE scanning: consider() -> _project_for_path()
+        # reads self._project_watch_dirs, so it must already reflect the active
+        # projects or the scan finds no owning project and drops every file.
+        self._project_watch_dirs = current
+
+        # Reconcile watchdog watches by resolved path (deduped by watchdog to
+        # one emitter per path). Only schedule paths not yet watched; only
+        # unschedule paths no longer wanted by any active project.
+        desired = {str(folder.resolve()): folder for folder in current.values()}
+        for path_str, folder in desired.items():
+            if path_str in self._watched_paths:
+                continue
+            try:
+                self._watched_paths[path_str] = self._observer.schedule(
+                    self._handler, path_str, recursive=True
+                )
+                logger.info("Watching %s", path_str)
+            except OSError:
+                logger.warning("Could not watch %s (missing/inaccessible?)", path_str)
+        for path_str in list(self._watched_paths):
+            if path_str not in desired:
+                self._observer.unschedule(self._watched_paths.pop(path_str))
+                logger.info("Stopped watching %s", path_str)
+
+        for folder in current.values():
+            self._scan_folder(folder)
+
+    def _scan_folder(self, folder: Path) -> None:
+        """Consider every footage file in an active folder, pruning Glambot's
+        own generated output subfolders so it never walks those big trees."""
+        if not folder.is_dir():
+            return
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if d not in _EXCLUDED_SUBDIRS]
+            for name in files:
+                path = Path(root) / name
+                if is_footage_file(path):
+                    self.consider(path)
 
     def _recover_stuck_jobs(self) -> None:
         """If the process was killed mid-ffmpeg, jobs left in 'processing'
@@ -88,37 +185,42 @@ class InboxWatcher:
                 self.store.mark_error(job.id, "source file disappeared while processing")
                 continue
             logger.info("Recovering job %s (%s) left in 'processing'", job.id, job.filename)
-            self._seen.add(str(path.resolve()))
+            self._seen.add((str(path.resolve()), job.project))
             self._queue.put(path)
 
-    def _is_relevant(self, path: Path) -> bool:
-        if not is_footage_file(path):
-            return False
-        try:
-            parts = path.relative_to(self.inbox_dir).parts
-        except ValueError:
-            return False
-        if len(parts) < 2:
-            return False  # must live inside a project subfolder, not the inbox root
-        if _EXCLUDED_SUBDIRS.intersection(parts):
-            return False
-        return True
-
-    def _scan_existing(self) -> None:
-        """Pick up footage that was already sitting in the inbox before this
-        process started (e.g. saved while the pipeline was offline)."""
-        if not self.inbox_dir.exists():
-            return
-        for project_dir in sorted(p for p in self.inbox_dir.iterdir() if p.is_dir()):
-            for f in sorted(project_dir.iterdir()):
-                if f.is_file() and is_footage_file(f):
-                    self.consider(f)
+    def _project_for_path(self, path: Path) -> str | None:
+        """Which project's watch folder (if any) this file lives under,
+        excluding Glambot's own output subfolders."""
+        resolved = path.resolve()
+        for project, watch_dir in self._project_watch_dirs.items():
+            try:
+                rel = resolved.relative_to(watch_dir.resolve())
+            except ValueError:
+                continue
+            if _EXCLUDED_SUBDIRS.intersection(rel.parts):
+                continue
+            return project
+        return None
 
     def consider(self, path: Path) -> None:
-        if not self._is_relevant(path):
+        if not is_footage_file(path):
             return
-        key = str(path.resolve())
-        if key in self._seen or self.store.find_by_source(key):
+        project = self._project_for_path(path)
+        if project is None:
+            return
+        resolved = str(path.resolve())
+        key = (resolved, project)
+        if key in self._seen:
+            return
+        existing = self.store.find_by_source(resolved)
+        if existing is not None and (self.inbox_dir / existing.project / "config.json").exists():
+            # This file already has a job under a project that STILL EXISTS —
+            # it's handled, so don't reprocess or reassign it. This is what
+            # keeps switching the active project on a shared folder from
+            # churning every already-processed clip: only files with no job,
+            # or an orphaned job left by a since-DELETED project, fall through
+            # to be processed under the now-active project.
+            self._seen.add(key)
             return
         self._seen.add(key)
         threading.Thread(target=self._wait_and_enqueue, args=(path,), daemon=True).start()
@@ -147,21 +249,52 @@ class InboxWatcher:
         self._queue.put(path)
 
     def _worker_loop(self) -> None:
+        last_sync = time.monotonic()
         while not self._stop.is_set():
+            if time.monotonic() - last_sync >= self.watch_sync_interval:
+                # Never let a bad sync (e.g. an unreadable folder) kill the
+                # worker thread — that would silently stop ALL detection and
+                # processing until the app is restarted.
+                try:
+                    self._sync_watches()
+                except Exception:
+                    logger.exception("watch sync failed")
+                last_sync = time.monotonic()
             try:
                 path = self._queue.get(timeout=0.5)
             except Empty:
                 continue
-            self._process_path(path)
+            # Likewise, one clip that blows up must not take the whole
+            # pipeline down with it.
+            try:
+                self._process_path(path)
+            except Exception:
+                logger.exception("processing %s failed", path)
 
     def _process_path(self, path: Path) -> None:
-        project_dir = path.parent
-        project = project_dir.name
+        project = self._project_for_path(path)
+        if project is None:
+            # Watch config changed between enqueue and now (e.g. source_dir
+            # edited or the project removed) — nothing sane to do with it.
+            return
+        project_dir = self.inbox_dir / project
         source_path = str(path.resolve())
 
         job = self.store.find_by_source(source_path)
         if job is None:
             job = self.store.create_job(project=project, filename=path.name, source_path=source_path)
+        elif job.project != project:
+            # The folder's active project changed since this file was last
+            # processed (or the old project was deleted). Re-attribute the
+            # single source_path row to the now-active project and clear ALL
+            # of the previous run's outputs/attribution — otherwise stale
+            # paths from the old project (thumbnail, secondary render, Drive
+            # links) leak into the fresh delivery.
+            job = self.store.update_job(
+                job.id, project=project, recipient_email=None,
+                output_path=None, thumbnail_path=None, secondary_output_path=None,
+                drive_link=None, secondary_drive_link=None, error=None,
+            )
 
         try:
             config = load_config(project_dir)
