@@ -291,14 +291,17 @@ unless you want the literal text removed.
    is what powers **thumbnails/kiosk previews, the live progress %, and
    audio-stream detection** (needed if you mix a soundtrack onto a silent
    clip). Core trimming/overlay/compress works either way.
-5. Double-click `run.bat` (or run it from a Command Prompt/PowerShell window).
-   First run creates a virtualenv and installs dependencies, so it'll take a
-   minute; after that it starts the review app the same as `./run.sh` does on
-   macOS.
+5. Double-click `Glambot.bat`. First run creates a virtualenv and installs
+   dependencies, so it'll take a minute; after that it starts the review app
+   the same as `./run.sh` does on macOS, and opens your browser to it
+   automatically once it's ready.
 
-There's no Windows equivalent of the double-click Mac `.app` in this repo —
-`run.bat` is the Windows launcher; it's plain-double-click-friendly once
-Python and `.env` are set up, it just briefly shows a console window.
+`Glambot.bat` is the closest Windows equivalent of the double-click Mac
+`.app`: it keeps a console window open (so you can see progress/logs and read
+any error before it closes) but auto-opens the review UI in your browser once
+the server responds. `run.bat` still exists underneath it with the same
+venv/install/`.env`-check logic, without the friendly title, auto-opened
+browser, or pause-on-error — handy if you'd rather run it from a terminal.
 
 Notes for Windows:
 - Set `INBOX_DIR` in `.env` to a Windows path, e.g. `INBOX_DIR=C:\Glambot\project`.
@@ -316,9 +319,10 @@ Notes for Windows:
 
 **Windows:**
 ```bat
-run.bat
+Glambot.bat
 ```
-(double-clickable from Explorer once Python is installed and `.env` is filled in)
+(double-clickable from Explorer once Python is installed and `.env` is filled in — opens your
+browser automatically once the app is ready; see "Windows setup" above)
 
 Either script creates a virtualenv, installs dependencies, checks for `.env`, then
 starts both the inbox watcher and the review app at `http://127.0.0.1:5000`
@@ -421,7 +425,7 @@ on another Mac or a Windows PC:
      is tracked in git).
    - `inbox/` — only copy this if you want to carry over in-progress
      footage/job history; otherwise leave it out and start fresh.
-4. **Run it**: `./run.sh` on macOS/Linux, `run.bat` on Windows (see "Windows
+4. **Run it**: `./run.sh` on macOS/Linux, `Glambot.bat` on Windows (see "Windows
    setup" above). On a second Mac, you can also rebuild the double-click app
    with `./mac_app/build_app.sh` — it now bakes in whatever path it's built
    from, so this works correctly on any Mac, not just the original one.

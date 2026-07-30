@@ -1,11 +1,13 @@
 # Runtime data (footage, generated files, secrets) — never committed
 inbox/
+project/
 overlays/
 !overlays/.gitkeep
 soundtracks/
 !soundtracks/.gitkeep
 *.sqlite
 *.sqlite3
+*.log
 .env
 credentials.json
 token.json

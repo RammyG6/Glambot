@@ -74,15 +74,21 @@ with normal `git` so the Mac can pull them too.
 
 ## 7. Run the app
 
-Double-click **`run.bat`** (or run it in a terminal). First run creates a virtualenv and
-installs dependencies (takes a minute), then starts the app — open http://127.0.0.1:5000
-(or whatever `HOST:PORT` you set in `.env`).
+Double-click **`Glambot.bat`**. First run creates a virtualenv and installs dependencies (takes
+a minute), then starts the app and **opens your browser automatically** at
+http://127.0.0.1:5000 (or whatever `HOST:PORT` you set in `.env`) once it's ready. The console
+window stays open so you can watch progress/logs, and it waits for a keypress before closing if
+something goes wrong, so errors are never lost to a flashing window.
+
+(`run.bat` still works too — same thing without the friendly title, auto-opened browser, or
+pause-on-error; useful if you want to run it from a terminal instead of double-clicking, e.g.
+while debugging.)
 
 ## Troubleshooting
 
 - **A window flashes and closes / "python not recognized":** Python isn't on PATH — reinstall
-  Python with "Add python.exe to PATH" ticked, or run `run.bat` from a terminal to read the
-  error.
+  Python with "Add python.exe to PATH" ticked. `Glambot.bat` now pauses on this error instead of
+  closing immediately, or you can run `run.bat` from a terminal to read the error.
 - **Stuck at processing a clip:** make sure you're on the latest code (`git pull`), confirm
   `ffmpeg -version` works, and watch the terminal window for the `Processing job … : <cmd>`
   line. If it still hangs, run `claude` in the repo and ask it to investigate — it can see the
