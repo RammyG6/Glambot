@@ -18,7 +18,7 @@ from .config import ProjectConfig
 from .db import Job, JobStore
 from .drive import upload_and_share
 from .emailer import send_delivery_email
-from .processor import QR_APPROVED_SUBDIR, QR_DOWNLOAD_SUBDIR, SENT_SUBDIR
+from .processor import QR_APPROVED_SUBDIR, QR_DOWNLOAD_SUBDIR, SENT_SUBDIR, resolve_output_base
 from .qr import make_delivery_photo, make_qr_data_uri
 
 logger = logging.getLogger(__name__)
@@ -33,12 +33,12 @@ class DeliveryResult:
     qr_data_uri2: str | None
 
 
-def _archive(job: Job, inbox_dir: Path, subdir: str) -> tuple[Path, Path | None, Path | None]:
+def _archive(job: Job, output_base: Path, subdir: str) -> tuple[Path, Path | None, Path | None]:
     """Move the primary output (+ thumbnail + secondary output, if present)
-    into the project's archive subfolder. Returns (primary, thumbnail,
-    secondary) destination paths."""
-    project_dir = inbox_dir / job.project
-    archive_dir = project_dir / subdir
+    into the project's archive subfolder (a sibling of the relocated Output
+    folder when a custom output_dir is configured). Returns (primary,
+    thumbnail, secondary) destination paths."""
+    archive_dir = output_base / subdir
     archive_dir.mkdir(parents=True, exist_ok=True)
 
     src = Path(job.output_path)
@@ -103,9 +103,11 @@ def deliver(job: Job, config: ProjectConfig, store: JobStore, inbox_dir: Path, *
         archived_secondary = Path(job.secondary_output_path) if job.secondary_output_path else None
         download_dir = archived_path.parent
     else:
+        project_dir = (config.project_dir or (inbox_dir / job.project)).resolve()
+        output_base = resolve_output_base(project_dir, config)
         archive_subdir = QR_APPROVED_SUBDIR if delivery_mode == "qr_only" else SENT_SUBDIR
-        archived_path, archived_thumb, archived_secondary = _archive(job, inbox_dir, archive_subdir)
-        download_dir = inbox_dir / job.project / QR_DOWNLOAD_SUBDIR
+        archived_path, archived_thumb, archived_secondary = _archive(job, output_base, archive_subdir)
+        download_dir = output_base / QR_DOWNLOAD_SUBDIR
 
     if delivery_mode == "qr_only" and archived_thumb:
         try:

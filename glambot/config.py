@@ -84,6 +84,7 @@ class ProjectConfig:
     second_overlay_scale: int | None = None
     second_overlay_x: float | None = None
     second_overlay_y: float | None = None
+    output_dir: Path | None = None
 
     @property
     def width(self) -> int:
@@ -351,6 +352,22 @@ def load_config(project_dir: Path) -> ProjectConfig:
     else:
         drive_folder_id = None
 
+    # --- Custom output location (parent dir; "<project>_Output" goes inside it) ---
+    output_dir = data.get("output_dir")
+    if output_dir:
+        output_dir_path = Path(output_dir).expanduser()
+        if not output_dir_path.is_absolute():
+            output_dir_path = Path.cwd() / output_dir_path
+        try:
+            output_dir_path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ConfigError(
+                f"{project_dir.name}/config.json: output_dir not accessible: {output_dir} ({exc})"
+            )
+        output_dir = output_dir_path.resolve()
+    else:
+        output_dir = None
+
     return ProjectConfig(
         recipient_email=recipient_email,
         bitrate=str(bitrate),
@@ -383,4 +400,28 @@ def load_config(project_dir: Path) -> ProjectConfig:
         second_overlay_scale=second_overlay_scale,
         second_overlay_x=second_overlay_x,
         second_overlay_y=second_overlay_y,
+        output_dir=output_dir,
     )
+
+
+def save_config(project_dir: Path, updates: dict, *, merge: bool = True) -> Path:
+    """Write project_dir/config.json.
+
+    When merge=True (the default, used by project edits), any existing
+    config.json is read first and `updates` is merged on top of it, so keys
+    not present in `updates` — overrides, or an overlay/soundtrack left
+    unchanged on an edit — are preserved rather than clobbered. merge=False
+    (used by project creation) writes `updates` as-is.
+    """
+    config_path = project_dir / "config.json"
+    data = dict(updates)
+    if merge and config_path.exists():
+        try:
+            existing = json.loads(config_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing = {}
+        if isinstance(existing, dict):
+            existing.update(updates)
+            data = existing
+    config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return config_path

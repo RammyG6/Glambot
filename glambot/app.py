@@ -20,12 +20,12 @@ from uuid import uuid4
 from flask import Flask, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
 
-from .config import AUDIO_EXTENSIONS, EMAIL_RE, ConfigError, extract_drive_folder_id, load_config
+from .config import AUDIO_EXTENSIONS, EMAIL_RE, ConfigError, extract_drive_folder_id, load_config, save_config
 from .db import Job, JobStore
 from .delivery import deliver
 from .drive import DriveError
 from .emailer import EmailError, load_default_template, resolve_placeholders, send_delivery_email
-from .folders import group_by_folder, project_watch_dirs
+from .folders import all_project_dirs, group_by_folder, project_watch_dirs
 from .qr import make_qr_data_uri
 
 logger = logging.getLogger(__name__)
@@ -90,12 +90,12 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
                 continue
             cards.append(_build_card(job, inbox_dir))
 
-        shared_folders = _compute_shared_folders(inbox_dir, store)
+        project_groups = _compute_project_groups(inbox_dir, store)
         output_log = store.list_jobs()[:60]
         email_log = [j for j in store.list_jobs(status="sent") if j.delivery_mode == "email"][:60]
         return render_template(
             "review.html", cards=cards, error_jobs=error_jobs, sent_jobs=sent_jobs,
-            shared_folders=shared_folders, processing_jobs=processing_jobs,
+            project_groups=project_groups, processing_jobs=processing_jobs,
             output_log=output_log, email_log=email_log, auto_failed=auto_failed,
         )
 
@@ -340,32 +340,16 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
     @app.get("/projects/new")
     def new_project_form():
         return render_template(
-            "project_form.html",
-            resolution_presets=RESOLUTION_PRESETS,
-            fps_presets=FPS_PRESETS,
-            bitrate_presets=BITRATE_PRESETS,
-            overlay_positions=OVERLAY_POSITIONS,
-            delivery_modes=DELIVERY_MODES,
-            rotation_choices=ROTATION_CHOICES,
-            existing_soundtracks=_list_soundtracks(),
-            error=None,
-            values={},
+            "project_form.html", mode="create", error=None, values={},
+            **_project_form_kwargs(),
         )
 
     @app.post("/projects/new")
     def create_project():
         def _form_error(message: str):
             return render_template(
-                "project_form.html",
-                resolution_presets=RESOLUTION_PRESETS,
-                fps_presets=FPS_PRESETS,
-                bitrate_presets=BITRATE_PRESETS,
-                overlay_positions=OVERLAY_POSITIONS,
-                delivery_modes=DELIVERY_MODES,
-                rotation_choices=ROTATION_CHOICES,
-                existing_soundtracks=_list_soundtracks(),
-                error=message,
-                values=request.form,
+                "project_form.html", mode="create", error=message, values=request.form,
+                **_project_form_kwargs(),
             ), 400
 
         fields, error = _parse_project_form(request)
@@ -415,7 +399,7 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
             data["soundtrack"] = f"soundtracks/{soundtrack_path.name}"
 
         config_path = project_dir / "config.json"
-        config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        save_config(project_dir, data, merge=False)
 
         try:
             load_config(project_dir)
@@ -439,22 +423,151 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         )
         return redirect(url_for("index"))
 
+    @app.get("/projects/<project>/edit")
+    def edit_project_form(project):
+        inbox_dir = app.config["INBOX_DIR"]
+        project_dir = inbox_dir / project
+        config_path = project_dir / "config.json"
+        if not config_path.exists():
+            abort(404)
+
+        # Read the raw dict directly rather than via load_config(), so a
+        # currently-broken config (invalid JSON or failed validation) can
+        # still be opened here and fixed, instead of being unreachable.
+        error = None
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("config.json must contain a JSON object")
+        except (json.JSONDecodeError, ValueError) as exc:
+            data = {}
+            error = f"config.json is not valid JSON ({exc}) — fix and save to repair it."
+        else:
+            try:
+                load_config(project_dir)
+            except ConfigError as exc:
+                error = str(exc)
+
+        values = _project_values_for_edit(data, project)
+        return render_template(
+            "project_form.html", mode="edit", error=error, values=values,
+            existing_overlay=data.get("overlay"), existing_second_overlay=data.get("second_overlay"),
+            **_project_form_kwargs(),
+        )
+
+    @app.post("/projects/<project>/edit")
+    def update_project(project):
+        inbox_dir = app.config["INBOX_DIR"]
+        project_dir = inbox_dir / project
+        config_path = project_dir / "config.json"
+        if not config_path.exists():
+            abort(404)
+
+        previous_text = config_path.read_text(encoding="utf-8")
+        try:
+            existing_data = json.loads(previous_text)
+            if not isinstance(existing_data, dict):
+                existing_data = {}
+        except json.JSONDecodeError:
+            existing_data = {}
+
+        def _form_error(message: str):
+            return render_template(
+                "project_form.html", mode="edit", error=message, values=request.form,
+                existing_overlay=existing_data.get("overlay"),
+                existing_second_overlay=existing_data.get("second_overlay"),
+                **_project_form_kwargs(),
+            ), 400
+
+        fields, error = _parse_project_form(request)
+        if error:
+            return _form_error(error)
+        data = fields["data"]
+        overlay_file = fields["overlay_file"]
+        second_overlay_file = fields["second_overlay_file"]
+        soundtrack_file = fields["soundtrack_file"]
+        # Renaming isn't supported here — project_name is read-only on the
+        # edit form; whatever the URL says for `project` always wins.
+
+        overlays_dir = _REPO_ROOT / "overlays"
+        overlays_dir.mkdir(parents=True, exist_ok=True)
+
+        def _save_overlay(file_storage) -> str:
+            fn = secure_filename(f"{project}_{file_storage.filename}")
+            dest = overlays_dir / fn
+            if dest.exists():
+                dest = overlays_dir / f"{dest.stem}_{uuid4().hex[:8]}{dest.suffix}"
+            file_storage.save(dest)
+            return f"overlays/{dest.name}"
+
+        # Only touch overlay/second_overlay/soundtrack when something new was
+        # actually uploaded this submission — otherwise leave the key out of
+        # `data` so save_config()'s merge preserves the existing reference.
+        if overlay_file is not None:
+            data["overlay"] = _save_overlay(overlay_file)
+        if second_overlay_file is not None:
+            data["second_overlay"] = _save_overlay(second_overlay_file)
+        if soundtrack_file is not None:
+            _SOUNDTRACKS_DIR.mkdir(parents=True, exist_ok=True)
+            soundtrack_filename = secure_filename(soundtrack_file.filename)
+            soundtrack_path = _SOUNDTRACKS_DIR / soundtrack_filename
+            if soundtrack_path.exists():
+                soundtrack_path = _SOUNDTRACKS_DIR / f"{soundtrack_path.stem}_{uuid4().hex[:8]}{soundtrack_path.suffix}"
+            soundtrack_file.save(soundtrack_path)
+            data["soundtrack"] = f"soundtracks/{soundtrack_path.name}"
+
+        save_config(project_dir, data, merge=True)
+
+        try:
+            load_config(project_dir)
+        except ConfigError as exc:
+            # Unlike create, there's a known-good prior config here — restore
+            # it instead of deleting anything.
+            config_path.write_text(previous_text, encoding="utf-8")
+            return _form_error(str(exc))
+
+        flash(
+            f"Project '{project}' updated. Already-processed clips stay in their current location.",
+            "info",
+        )
+        return redirect(url_for("index"))
+
     return app
 
 
-def _compute_shared_folders(inbox_dir: Path, store: JobStore) -> list[dict]:
-    """Folders currently claimed by 2+ projects, each annotated with which
-    project is the active (watched) one — for the review page's "Shared
-    footage folders" section."""
-    watch_dirs = project_watch_dirs(inbox_dir)
+def _compute_project_groups(inbox_dir: Path, store: JobStore) -> list[dict]:
+    """Every project under inbox_dir, grouped by effective footage folder —
+    projects sharing a folder are grouped together (with an "active" marker
+    and "Make active" control); every other project gets its own singleton
+    group. Projects with a broken config.json still get a row (flagged with
+    an error) so the main page's Edit link can be used to fix them, unlike
+    project_watch_dirs() which silently skips them."""
+    watch_dirs = project_watch_dirs(inbox_dir)  # valid configs only
     groups = group_by_folder(watch_dirs)
-    shared = []
-    for folder, projects in groups.items():
-        if len(projects) < 2:
+
+    errors: dict[str, str] = {}
+    for project_dir in all_project_dirs(inbox_dir):
+        name = project_dir.name
+        if name in watch_dirs:
             continue
-        active = store.get_active_project(str(folder)) or sorted(projects)[0]
-        shared.append({"folder": str(folder), "projects": sorted(projects), "active": active})
-    return sorted(shared, key=lambda s: s["folder"])
+        try:
+            load_config(project_dir)
+        except ConfigError as exc:
+            errors[name] = str(exc)
+            groups.setdefault(project_dir, []).append(name)
+
+    result = []
+    for folder, projects in groups.items():
+        shared = len(projects) > 1
+        active = (store.get_active_project(str(folder)) or sorted(projects)[0]) if shared else None
+        result.append({
+            "folder": str(folder),
+            "shared": shared,
+            "projects": sorted(projects),
+            "active": active,
+            "errors": errors,
+        })
+    return sorted(result, key=lambda g: g["folder"])
 
 
 def _list_soundtracks() -> list[str]:
@@ -464,6 +577,116 @@ def _list_soundtracks() -> list[str]:
         p.name for p in _SOUNDTRACKS_DIR.iterdir()
         if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS
     )
+
+
+def _project_form_kwargs() -> dict:
+    """Template kwargs shared by every render of project_form.html (create
+    and edit alike), besides mode/error/values which differ per call site."""
+    return {
+        "resolution_presets": RESOLUTION_PRESETS,
+        "fps_presets": FPS_PRESETS,
+        "bitrate_presets": BITRATE_PRESETS,
+        "overlay_positions": OVERLAY_POSITIONS,
+        "delivery_modes": DELIVERY_MODES,
+        "rotation_choices": ROTATION_CHOICES,
+        "existing_soundtracks": _list_soundtracks(),
+    }
+
+
+def _project_values_for_edit(data: dict, project_name: str) -> dict:
+    """Reverse-map a raw config.json dict into the flat form-field keys that
+    project_form.html / _parse_project_form use, so an existing project's
+    settings can be pre-filled onto the same form used for creation."""
+    values: dict[str, str] = {"project_name": project_name}
+
+    def _split_resolution(res, prefix: str = "") -> None:
+        if not res:
+            return
+        preset_values = {val for val, _ in RESOLUTION_PRESETS}
+        if res in preset_values:
+            values[f"{prefix}resolution_preset"] = res
+        else:
+            values[f"{prefix}resolution_preset"] = "custom"
+            if "x" in res:
+                w, h = res.split("x", 1)
+                values[f"{prefix}custom_width"] = w
+                values[f"{prefix}custom_height"] = h
+
+    _split_resolution(data.get("resolution"))
+    second_resolution = data.get("second_resolution")
+    if second_resolution:
+        values["second_resolution_enabled"] = "on"
+        _split_resolution(second_resolution, "second_")
+
+    fps = data.get("fps")
+    if fps is not None:
+        if fps in FPS_PRESETS:
+            values["fps_preset"] = str(fps)
+        else:
+            values["fps_preset"] = "custom"
+            values["custom_fps"] = str(fps)
+
+    def _split_bitrate(bitrate, prefix: str = "") -> None:
+        if not bitrate:
+            return
+        if bitrate in BITRATE_PRESETS:
+            values[f"{prefix}bitrate_preset"] = bitrate
+        else:
+            values[f"{prefix}bitrate_preset"] = "custom"
+            values[f"{prefix}custom_bitrate"] = bitrate
+
+    _split_bitrate(data.get("bitrate"))
+    _split_bitrate(data.get("second_bitrate"), "second_")
+
+    values["delivery_mode"] = data.get("delivery_mode", "email")
+    values["recipient_email"] = data.get("recipient_email", "")
+
+    trim = data.get("trim") or {}
+    values["trim_start"] = trim.get("start") or ""
+    values["trim_end"] = trim.get("end") or ""
+
+    values["overlay_position"] = data.get("overlay_position", "full")
+    if data.get("overlay_scale") is not None:
+        values["overlay_scale"] = str(data["overlay_scale"])
+    if data.get("overlay_x") is not None:
+        values["overlay_x"] = str(data["overlay_x"])
+    if data.get("overlay_y") is not None:
+        values["overlay_y"] = str(data["overlay_y"])
+
+    values["second_overlay_position"] = data.get("second_overlay_position", "full")
+    if data.get("second_overlay_scale") is not None:
+        values["second_overlay_scale"] = str(data["second_overlay_scale"])
+    if data.get("second_overlay_x") is not None:
+        values["second_overlay_x"] = str(data["second_overlay_x"])
+    if data.get("second_overlay_y") is not None:
+        values["second_overlay_y"] = str(data["second_overlay_y"])
+
+    values["rotation"] = str(data.get("rotation", 0))
+    values["position_x"] = str(data.get("position_x", 0))
+    values["position_y"] = str(data.get("position_y", 0))
+
+    if data.get("auto_deliver"):
+        values["auto_deliver"] = "on"
+
+    soundtrack = data.get("soundtrack")
+    if soundtrack:
+        name = Path(soundtrack).name
+        values["soundtrack_choice"] = name if name in set(_list_soundtracks()) else "__none__"
+    else:
+        values["soundtrack_choice"] = "__none__"
+    if data.get("soundtrack_volume_db") is not None:
+        values["soundtrack_volume_db"] = str(data["soundtrack_volume_db"])
+    if data.get("original_volume_db") is not None:
+        values["original_volume_db"] = str(data["original_volume_db"])
+    soundtrack_trim = data.get("soundtrack_trim") or {}
+    values["soundtrack_trim_start"] = soundtrack_trim.get("start") or ""
+    values["soundtrack_trim_end"] = soundtrack_trim.get("end") or ""
+
+    values["source_dir"] = data.get("source_dir") or ""
+    values["output_dir"] = data.get("output_dir") or ""
+    values["drive_folder_id"] = data.get("drive_folder_id") or ""
+
+    return values
 
 
 def _build_card(job: Job, inbox_dir: Path) -> dict:
@@ -740,10 +963,25 @@ def _parse_project_form(req):
         if not source_path.is_dir():
             return None, "Footage source folder does not exist or is not a directory."
 
+    # --- Custom output location (parent dir only; "<project>_Output" is
+    # appended automatically, never user-typed) ----------------------------
+    output_dir_raw = form.get("output_dir", "").strip()
+    if output_dir_raw:
+        output_path = Path(output_dir_raw).expanduser()
+        if output_path.exists() and not output_path.is_dir():
+            return None, "Output location must be a folder, not a file."
+
     # --- Per-project Google Drive destination folder ----------------------
     drive_folder_raw = form.get("drive_folder_id", "").strip()
     drive_folder_id = extract_drive_folder_id(drive_folder_raw) if drive_folder_raw else None
 
+    # Every field below is written explicitly (even at its "unset" default)
+    # rather than only when truthy. This matters for editing an existing
+    # project: save_config() merges these keys over the existing config.json,
+    # so a field the operator resets to its default (e.g. unchecking "auto
+    # deliver", clearing a custom position) must still overwrite the old
+    # value instead of silently leaving it in place because the key was
+    # omitted. Harmless for a brand-new project either way.
     data: dict = {
         "recipient_email": recipient_email,
         "delivery_mode": delivery_mode,
@@ -751,40 +989,34 @@ def _parse_project_form(req):
         "resolution": f"{width}x{height}",
         "aspect_ratio": _aspect_ratio_label(width, height),
         "trim": {k: v for k, v in (("start", trim_start), ("end", trim_end)) if v},
-    }
-    # Overlay position/scale/x/y only meaningful when an overlay is uploaded.
-    if overlay_file is not None:
-        data.update(overlay_updates)
-    if fps is not None:
-        data["fps"] = fps
-    if rotation:
-        data["rotation"] = rotation
-    if position_x is not None:
-        data["position_x"] = position_x
-    if position_y is not None:
-        data["position_y"] = position_y
-    if auto_deliver:
-        data["auto_deliver"] = True
-    if soundtrack_rel_path is not None:
-        data["soundtrack"] = soundtrack_rel_path
-    if soundtrack_volume_db is not None:
-        data["soundtrack_volume_db"] = soundtrack_volume_db
-    if original_volume_db is not None:
-        data["original_volume_db"] = original_volume_db
-    if soundtrack_trim_start or soundtrack_trim_end:
-        data["soundtrack_trim"] = {
+        "fps": fps,
+        "rotation": rotation,
+        "position_x": position_x if position_x is not None else 0,
+        "position_y": position_y if position_y is not None else 0,
+        "auto_deliver": auto_deliver,
+        "soundtrack_volume_db": soundtrack_volume_db if soundtrack_volume_db is not None else 0.0,
+        "original_volume_db": original_volume_db if original_volume_db is not None else 0.0,
+        "soundtrack_trim": {
             k: v for k, v in (("start", soundtrack_trim_start), ("end", soundtrack_trim_end)) if v
-        }
-    if second_resolution is not None:
-        data["second_resolution"] = second_resolution
-    if second_bitrate is not None:
-        data["second_bitrate"] = second_bitrate
-    if second_overlay_file is not None:
-        data.update(second_overlay_updates)
-    if source_dir_raw:
-        data["source_dir"] = str(Path(source_dir_raw).expanduser().resolve())
-    if drive_folder_id:
-        data["drive_folder_id"] = drive_folder_id
+        },
+        "second_resolution": second_resolution,
+        "second_bitrate": second_bitrate,
+        "source_dir": str(Path(source_dir_raw).expanduser().resolve()) if source_dir_raw else None,
+        "output_dir": str(Path(output_dir_raw).expanduser().resolve()) if output_dir_raw else None,
+        "drive_folder_id": drive_folder_id,
+    }
+    # Overlay position/scale/x/y are saved even without a new upload, so an
+    # existing overlay's placement can be nudged/resized on its own (edit
+    # mode). Harmless on create with no overlay — the keys just go unused.
+    data.update(overlay_updates)
+    data.update(second_overlay_updates)
+    # soundtrack: an explicit "None" selection clears it; an existing-file
+    # choice sets it; "__upload__" is left for the caller to fill in once the
+    # uploaded file is actually saved to disk.
+    if soundtrack_choice == "__none__":
+        data["soundtrack"] = None
+    elif soundtrack_rel_path is not None:
+        data["soundtrack"] = soundtrack_rel_path
 
     return {
         "data": data,

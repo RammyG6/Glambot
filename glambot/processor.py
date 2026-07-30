@@ -29,6 +29,18 @@ class OverlaySpec:
     y: float | None = None
 
 
+def resolve_output_base(project_dir: Path, config: ProjectConfig) -> Path:
+    """Base directory that holds the mode subfolder (Output /
+    Output_ReadytoSend) and every sibling archive folder (Selected Output,
+    Instant Download, Email Sent File). Defaults to project_dir (today's
+    behavior). When config.output_dir is set, relocates to
+    <output_dir>/<project_dir.name>_Output, so the whole output lifecycle for
+    that project lives under one relocated parent."""
+    if config.output_dir:
+        return (config.output_dir / f"{project_dir.name}_Output").resolve()
+    return project_dir
+
+
 def _primary_overlay_spec(config: ProjectConfig) -> OverlaySpec:
     return OverlaySpec(config.overlay, config.overlay_position, config.overlay_scale,
                        config.overlay_x, config.overlay_y)
@@ -382,9 +394,14 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
 
     source_path = Path(job.source_path)
     project_dir = (config.project_dir or source_path.parent).resolve()
+    output_base = resolve_output_base(project_dir, config)
     output_subdir = QR_OUTPUT_SUBDIR if config.delivery_mode == "qr_only" else OUTPUT_SUBDIR
-    output_dir = project_dir / output_subdir
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = output_base / output_subdir
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        store.mark_error(job.id, f"Output location not accessible: {exc}")
+        return
     # Always store an absolute path: it's persisted in the DB and later read
     # back by send_file()/shutil.move() in a process that may have a
     # different working directory than the one that created this job.

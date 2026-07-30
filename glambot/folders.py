@@ -33,3 +33,16 @@ def group_by_folder(watch_dirs: dict[str, Path]) -> dict[Path, list[str]]:
     for project, folder in watch_dirs.items():
         groups.setdefault(folder, []).append(project)
     return groups
+
+
+def all_project_dirs(inbox_dir: Path) -> list[Path]:
+    """Every subfolder of inbox_dir that has a config.json, valid or not —
+    for UI surfaces (like the main page's project list) that must list every
+    project, including ones whose config is currently broken, unlike
+    project_watch_dirs() which silently skips ConfigError projects."""
+    if not inbox_dir.exists():
+        return []
+    return sorted(
+        (p for p in inbox_dir.iterdir() if p.is_dir() and (p / "config.json").exists()),
+        key=lambda p: p.name,
+    )

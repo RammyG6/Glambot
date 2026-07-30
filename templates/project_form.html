@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Glambot — New Project</title>
+<title>Glambot — {{ 'Edit Project' if mode == 'edit' else 'New Project' }}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
   .layout { display: flex; gap: 2rem; align-items: flex-start; flex-wrap: wrap; }
@@ -25,8 +25,12 @@
 </head>
 <body>
   <a class="back" href="{{ url_for('index') }}">&larr; Back to review queue</a>
-  <h1>New Project</h1>
-  <p class="hint">Fills in config.json for you — no need to hand-write it. After saving, drop footage into the project's folder to start processing.</p>
+  <h1>{{ 'Edit Project' if mode == 'edit' else 'New Project' }}</h1>
+  {% if mode == 'edit' %}
+    <p class="hint">Changes save straight into this project's config.json. Already-processed clips aren't affected.</p>
+  {% else %}
+    <p class="hint">Fills in config.json for you — no need to hand-write it. After saving, drop footage into the project's folder to start processing.</p>
+  {% endif %}
 
   {% if error %}
     <div class="flash error">{{ error }}</div>
@@ -37,8 +41,13 @@
       <fieldset>
         <legend>Project</legend>
         <label for="project_name">Project name</label>
-        <input type="text" id="project_name" name="project_name" value="{{ values.get('project_name', '') }}" required>
-        <p class="hint">Becomes the folder name under inbox/ — letters, numbers, spaces, - or _ only.</p>
+        <input type="text" id="project_name" name="project_name" value="{{ values.get('project_name', '') }}" required
+               {% if mode == 'edit' %}readonly{% endif %}>
+        {% if mode == 'edit' %}
+          <p class="hint">Project name can't be changed here.</p>
+        {% else %}
+          <p class="hint">Becomes the folder name under inbox/ — letters, numbers, spaces, - or _ only.</p>
+        {% endif %}
 
         <label for="delivery_mode">Delivery method</label>
         <select id="delivery_mode" name="delivery_mode">
@@ -80,6 +89,18 @@
           <button type="button" class="use-here secondary" id="useThisFolder">Use this folder</button>
         </div>
         <p class="hint">Point at any folder on this machine (e.g. an SD-card import folder) instead of dropping footage into inbox/. Leave blank for the default location.</p>
+
+        <label for="output_dir">Custom output location (optional)</label>
+        <div class="browse-row">
+          <input type="text" id="output_dir" name="output_dir" placeholder="Leave blank to use the project's own folder" value="{{ values.get('output_dir', '') }}">
+          <button type="button" class="secondary" id="browseButton2">Browse&hellip;</button>
+        </div>
+        <div class="folder-browser" id="folderBrowser2">
+          <div class="crumb" id="folderBrowserPath2"></div>
+          <ul id="folderBrowserList2"></ul>
+          <button type="button" class="use-here secondary" id="useThisFolder2">Use this folder</button>
+        </div>
+        <p class="hint">Choose the parent folder only — Glambot creates "&lt;project name&gt;_Output" inside it automatically. Leave blank to keep processed clips inside the project's own folder.</p>
 
         <label for="drive_folder_id">Google Drive destination folder (optional)</label>
         <input type="text" id="drive_folder_id" name="drive_folder_id" placeholder="Paste a folder ID or its share link" value="{{ values.get('drive_folder_id', '') }}">
@@ -187,7 +208,11 @@
 
           <label for="second_overlay_file" style="margin-top:1rem;">Second overlay image (optional)</label>
           <input type="file" id="second_overlay_file" name="second_overlay_file" accept="image/*">
-          <p class="hint">A separate overlay for the second resolution (e.g. a horizontal logo for a 16:9 cut). Leave empty for no overlay on the second export.</p>
+          {% if mode == 'edit' and existing_second_overlay %}
+            <p class="hint">Current second overlay: <code>{{ existing_second_overlay }}</code> — leave blank to keep it, choose a file to replace it.</p>
+          {% else %}
+            <p class="hint">A separate overlay for the second resolution (e.g. a horizontal logo for a 16:9 cut). Leave empty for no overlay on the second export.</p>
+          {% endif %}
 
           <label for="second_overlay_position">Position</label>
           <select id="second_overlay_position" name="second_overlay_position">
@@ -212,7 +237,11 @@
         <legend>Overlay graphic (optional)</legend>
         <label for="overlay_file">Overlay image</label>
         <input type="file" id="overlay_file" name="overlay_file" accept="image/*">
-        <p class="hint">Leave empty for no overlay — the clip is exported clean.</p>
+        {% if mode == 'edit' and existing_overlay %}
+          <p class="hint">Current overlay: <code>{{ existing_overlay }}</code> — leave blank to keep it, choose a file to replace it.</p>
+        {% else %}
+          <p class="hint">Leave empty for no overlay — the clip is exported clean.</p>
+        {% endif %}
 
         <label for="overlay_position">Position</label>
         <select id="overlay_position" name="overlay_position">
@@ -269,7 +298,7 @@
         <p class="hint">Optional — use just a portion of the track. Leave blank to use it from the start / play to its end.</p>
       </fieldset>
 
-      <button type="submit">Create Project</button>
+      <button type="submit">{{ 'Save Changes' if mode == 'edit' else 'Create Project' }}</button>
     </form>
 
     <div class="preview-col">
@@ -449,47 +478,59 @@
     el.addEventListener('input', updatePreview);
   });
 
-  // --- Footage source folder browser ---
-  const sourceDirInput = document.getElementById('source_dir');
-  const browseButton = document.getElementById('browseButton');
-  const folderBrowser = document.getElementById('folderBrowser');
-  const folderBrowserPath = document.getElementById('folderBrowserPath');
-  const folderBrowserList = document.getElementById('folderBrowserList');
-  const useThisFolder = document.getElementById('useThisFolder');
-  let browserCurrentPath = null;
+  // --- Reusable folder-browser widget (used for both the footage source
+  // folder and the custom output location) ---
+  function initFolderBrowser(opts) {
+    const input = document.getElementById(opts.inputId);
+    const browseButton = document.getElementById(opts.browseButtonId);
+    const folderBrowser = document.getElementById(opts.folderBrowserId);
+    const folderBrowserPath = document.getElementById(opts.pathId);
+    const folderBrowserList = document.getElementById(opts.listId);
+    const useThisFolder = document.getElementById(opts.useHereId);
+    let currentPath = null;
 
-  function loadFolder(path) {
-    const qs = path ? ('?path=' + encodeURIComponent(path)) : '';
-    fetch('/browse' + qs)
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        browserCurrentPath = data.path;
-        folderBrowserPath.textContent = data.path;
-        folderBrowserList.innerHTML = '';
-        if (data.parent) {
-          const up = document.createElement('li');
-          up.textContent = '.. (up)';
-          up.addEventListener('click', function () { loadFolder(data.parent); });
-          folderBrowserList.appendChild(up);
-        }
-        data.folders.forEach(function (name) {
-          const li = document.createElement('li');
-          li.textContent = name;
-          li.addEventListener('click', function () {
-            loadFolder(data.path + (data.path.endsWith('/') ? '' : '/') + name);
+    function loadFolder(path) {
+      const qs = path ? ('?path=' + encodeURIComponent(path)) : '';
+      fetch('/browse' + qs)
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          currentPath = data.path;
+          folderBrowserPath.textContent = data.path;
+          folderBrowserList.innerHTML = '';
+          if (data.parent) {
+            const up = document.createElement('li');
+            up.textContent = '.. (up)';
+            up.addEventListener('click', function () { loadFolder(data.parent); });
+            folderBrowserList.appendChild(up);
+          }
+          data.folders.forEach(function (name) {
+            const li = document.createElement('li');
+            li.textContent = name;
+            li.addEventListener('click', function () {
+              loadFolder(data.path + (data.path.endsWith('/') ? '' : '/') + name);
+            });
+            folderBrowserList.appendChild(li);
           });
-          folderBrowserList.appendChild(li);
         });
-      });
+    }
+
+    browseButton.addEventListener('click', function () {
+      const isOpen = folderBrowser.classList.toggle('open');
+      if (isOpen) loadFolder(input.value || null);
+    });
+    useThisFolder.addEventListener('click', function () {
+      if (currentPath) input.value = currentPath;
+      folderBrowser.classList.remove('open');
+    });
   }
 
-  browseButton.addEventListener('click', function () {
-    const isOpen = folderBrowser.classList.toggle('open');
-    if (isOpen) loadFolder(sourceDirInput.value || null);
+  initFolderBrowser({
+    inputId: 'source_dir', browseButtonId: 'browseButton', folderBrowserId: 'folderBrowser',
+    pathId: 'folderBrowserPath', listId: 'folderBrowserList', useHereId: 'useThisFolder',
   });
-  useThisFolder.addEventListener('click', function () {
-    if (browserCurrentPath) sourceDirInput.value = browserCurrentPath;
-    folderBrowser.classList.remove('open');
+  initFolderBrowser({
+    inputId: 'output_dir', browseButtonId: 'browseButton2', folderBrowserId: 'folderBrowser2',
+    pathId: 'folderBrowserPath2', listId: 'folderBrowserList2', useHereId: 'useThisFolder2',
   });
 
   toggleVisibility();
