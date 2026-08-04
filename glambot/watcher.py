@@ -22,24 +22,29 @@ from queue import Empty, Queue
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from .config import ConfigError, load_config
+from .config import MANAGED_SUBDIRS, ConfigError, load_config, managed_subdir_in
 from .db import JobStore
 from .folders import group_by_folder, project_watch_dirs
-from .processor import (
-    EDITED_FOOTAGES_SUBDIR,
-    OUTPUT_SUBDIR,
-    QR_APPROVED_SUBDIR,
-    QR_DOWNLOAD_SUBDIR,
-    QR_OUTPUT_SUBDIR,
-    SENT_SUBDIR,
-    is_footage_file,
-    process_job,
-)
+from .processor import is_footage_file, process_job
 
-_EXCLUDED_SUBDIRS = {OUTPUT_SUBDIR, SENT_SUBDIR, QR_OUTPUT_SUBDIR, QR_APPROVED_SUBDIR,
-                     QR_DOWNLOAD_SUBDIR, EDITED_FOOTAGES_SUBDIR}
+_EXCLUDED_SUBDIRS = MANAGED_SUBDIRS
 
 logger = logging.getLogger(__name__)
+
+
+def _is_locked(path: Path) -> bool:
+    """Windows-only: True if another process (e.g. an FTP server) still has
+    `path` open. Renaming a file onto itself fails with a sharing violation
+    while the writer holds it without FILE_SHARE_DELETE — a stronger
+    completion signal than size-stability alone, since a stalled (but still
+    open) transfer can otherwise look byte-for-byte stable."""
+    if os.name != "nt":
+        return False
+    try:
+        os.rename(path, path)
+    except OSError:
+        return True
+    return False
 
 
 class _Handler(FileSystemEventHandler):
@@ -84,6 +89,9 @@ class InboxWatcher:
         # unscheduling one project's watch on a shared folder tears down the
         # emitter the newly-active project still depends on.
         self._watched_paths: dict[str, object] = {}
+        # Projects already warned about pointing at a Glambot-managed folder,
+        # so the every-10s sync doesn't spam the log with the same line.
+        self._warned_managed: set[str] = set()
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._stop = threading.Event()
 
@@ -100,6 +108,30 @@ class InboxWatcher:
         self._observer.stop()
         self._observer.join()
         self._worker_thread.join(timeout=5)
+
+    def _drop_managed_watch_dirs(self, candidates: dict[str, Path]) -> dict[str, Path]:
+        """Refuse to watch any folder inside one Glambot manages itself.
+
+        load_config() rejects these too, so normally nothing reaches here —
+        but a config.json written before that validation existed would
+        otherwise start an endless loop: `_archive_original` moves each
+        finished original into "Edited Footages", and a project watching that
+        folder sees every one of them as brand-new footage."""
+        kept: dict[str, Path] = {}
+        for project, folder in candidates.items():
+            managed = managed_subdir_in(folder)
+            if managed is None:
+                kept[project] = folder
+                continue
+            if project not in self._warned_managed:
+                self._warned_managed.add(project)
+                logger.warning(
+                    "Not watching %s for project %s: it is inside Glambot's own '%s' "
+                    "folder, which holds already-processed clips. Point the project's "
+                    "footage source folder at the import folder instead.",
+                    folder, project, managed,
+                )
+        return kept
 
     def _sync_watches(self) -> None:
         """Re-read every project's config.json, keep the set of watched
@@ -118,6 +150,7 @@ class InboxWatcher:
         idempotent (consider() dedups via `_seen`/`find_by_source`) and cheap,
         so it also self-heals any live FS event that was missed."""
         candidates = project_watch_dirs(self.inbox_dir)
+        candidates = self._drop_managed_watch_dirs(candidates)
         groups = group_by_folder(candidates)
 
         current: dict[str, Path] = {}
@@ -226,8 +259,10 @@ class InboxWatcher:
         threading.Thread(target=self._wait_and_enqueue, args=(path,), daemon=True).start()
 
     def _wait_and_enqueue(self, path: Path) -> None:
-        """Poll the file's size until it stops changing for `settle_seconds`,
-        so we don't start processing a file that's still being copied."""
+        """Poll the file's size until it stops changing for `settle_seconds`
+        AND it's no longer held open by another process, so we don't start
+        processing a file that's still being copied — or one whose FTP
+        transfer has merely stalled long enough to look size-stable."""
         last_size = -1
         stable_since: float | None = None
         while not self._stop.is_set():
@@ -239,7 +274,11 @@ class InboxWatcher:
                 if stable_since is None:
                     stable_since = time.monotonic()
                 elif time.monotonic() - stable_since >= self.settle_seconds:
-                    break
+                    if not _is_locked(path):
+                        break
+                    # Still open by its writer: restart the settle timer and
+                    # keep waiting rather than grabbing a partial file.
+                    stable_since = None
             else:
                 stable_since = None
                 last_size = size

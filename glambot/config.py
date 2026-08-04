@@ -40,6 +40,39 @@ VALID_ROTATIONS = {0, 90, -90, 180}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 MIN_DB, MAX_DB = -60.0, 12.0
 
+# --- Folders Glambot creates and manages itself ---------------------------
+# These live here rather than in processor.py (where they're used) because
+# config validation has to reject them as a footage source, and config.py is
+# the only module low enough in the import graph for both to share them.
+OUTPUT_SUBDIR = "Output_ReadytoSend"
+SENT_SUBDIR = "Email Sent File"
+
+# QR-only ("Instant Download" / kiosk) projects use a separate on-disk layout
+# from email-mode projects.
+QR_OUTPUT_SUBDIR = "Output"
+QR_APPROVED_SUBDIR = "Selected Output"
+QR_DOWNLOAD_SUBDIR = "Instant Download"
+
+# Where processed originals are moved to, inside their own import folder.
+EDITED_FOOTAGES_SUBDIR = "Edited Footages"
+
+# Every folder name above, as one set. Two things key off it: the watcher
+# prunes these from its scans, and a project's footage source folder is not
+# allowed to sit inside one — pointing a project at, say, "Edited Footages"
+# makes it re-process every clip another project has already finished.
+MANAGED_SUBDIRS = frozenset({
+    OUTPUT_SUBDIR, SENT_SUBDIR, QR_OUTPUT_SUBDIR, QR_APPROVED_SUBDIR,
+    QR_DOWNLOAD_SUBDIR, EDITED_FOOTAGES_SUBDIR,
+})
+
+
+def managed_subdir_in(path: Path) -> str | None:
+    """The Glambot-managed folder name `path` sits inside (or is), if any."""
+    for part in Path(path).parts:
+        if part in MANAGED_SUBDIRS:
+            return part
+    return None
+
 
 class ConfigError(ValueError):
     """Raised when a project's config.json is missing or invalid."""
@@ -342,6 +375,16 @@ def load_config(project_dir: Path) -> ProjectConfig:
                 f"{project_dir.name}/config.json: source_dir not found or not a directory: {source_dir}"
             )
         source_dir = source_dir_path.resolve()
+        managed = managed_subdir_in(source_dir)
+        if managed:
+            # Watching a folder Glambot writes into re-processes clips that
+            # are already finished — an "Edited Footages" source turns every
+            # archived original back into new footage, forever.
+            raise ConfigError(
+                f"{project_dir.name}/config.json: source_dir is inside Glambot's own "
+                f"'{managed}' folder ({source_dir}). That folder holds clips Glambot has "
+                f"already processed - point source_dir at the import folder instead."
+            )
     else:
         source_dir = None
 

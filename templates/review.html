@@ -17,6 +17,7 @@
   .shared-folder li button { margin: 0; padding: .3rem .8rem; font-size: .78rem; }
   .shared-folder li a { font-size: .78rem; white-space: nowrap; }
   .shared-folder li .config-error { color: #ff8a80; font-size: .78rem; cursor: help; }
+  .shared-folder .shared-note { color: var(--accent); }
   .processing { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.25rem 1.5rem; margin-bottom: 2rem; }
   .proc-item { padding: .5rem 0; }
   .proc-item .proc-label { font-size: .9rem; margin-bottom: .4rem; }
@@ -57,7 +58,10 @@
     {% endif %}
     {% for pg in project_groups %}
       <div class="shared-folder">
-        {% if pg.shared %}<div class="path"><code>{{ pg.folder }}</code></div>{% endif %}
+        <div class="path">
+          <code>{{ pg.folder }}</code>
+          {% if pg.shared %}<span class="shared-note">· shared by {{ pg.projects | length }} projects</span>{% endif %}
+        </div>
         <ul>
           {% for p in pg.projects %}
             <li class="{{ 'active' if pg.shared and p == pg.active else '' }}">

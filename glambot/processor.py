@@ -10,7 +10,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from .config import ProjectConfig
+from .config import (
+    EDITED_FOOTAGES_SUBDIR,
+    OUTPUT_SUBDIR,
+    QR_APPROVED_SUBDIR,
+    QR_DOWNLOAD_SUBDIR,
+    QR_OUTPUT_SUBDIR,
+    SENT_SUBDIR,
+    ProjectConfig,
+)
 from .db import Job, JobStore
 from .drive import DriveError, upload_and_share
 from .emailer import EmailError
@@ -51,18 +59,6 @@ def _second_overlay_spec(config: ProjectConfig) -> OverlaySpec:
                        config.second_overlay_scale, config.second_overlay_x, config.second_overlay_y)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
-
-OUTPUT_SUBDIR = "Output_ReadytoSend"
-SENT_SUBDIR = "Email Sent File"
-
-# QR-only ("Instant Download" / kiosk) projects use a separate on-disk layout
-# from email-mode projects.
-QR_OUTPUT_SUBDIR = "Output"
-QR_APPROVED_SUBDIR = "Selected Output"
-QR_DOWNLOAD_SUBDIR = "Instant Download"
-
-# Where processed originals are moved to, inside their own import folder.
-EDITED_FOOTAGES_SUBDIR = "Edited Footages"
 
 _OVERLAY_MARGIN = 20
 THUMBNAIL_SUFFIX = ".jpg"

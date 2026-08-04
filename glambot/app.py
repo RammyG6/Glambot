@@ -20,7 +20,15 @@ from uuid import uuid4
 from flask import Flask, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
 
-from .config import AUDIO_EXTENSIONS, EMAIL_RE, ConfigError, extract_drive_folder_id, load_config, save_config
+from .config import (
+    AUDIO_EXTENSIONS,
+    EMAIL_RE,
+    ConfigError,
+    extract_drive_folder_id,
+    load_config,
+    managed_subdir_in,
+    save_config,
+)
 from .db import Job, JobStore
 from .delivery import deliver
 from .drive import DriveError
@@ -962,6 +970,13 @@ def _parse_project_form(req):
         source_path = Path(source_dir_raw).expanduser()
         if not source_path.is_dir():
             return None, "Footage source folder does not exist or is not a directory."
+        managed = managed_subdir_in(source_path.resolve())
+        if managed:
+            return None, (
+                f"Footage source folder cannot be inside Glambot's own '{managed}' folder. "
+                f"That folder holds clips Glambot has already processed, so watching it "
+                f"would re-process every clip. Pick the import folder instead."
+            )
 
     # --- Custom output location (parent dir only; "<project>_Output" is
     # appended automatically, never user-typed) ----------------------------
