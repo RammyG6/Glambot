@@ -19,6 +19,7 @@
   .shared-folder li .config-error { color: #ff8a80; font-size: .78rem; cursor: help; }
   .shared-folder .shared-note { color: var(--accent); }
   .shared-folder li a.danger-link { color: #ff8a80; }
+  .shared-folders a.delete-all { float: right; font-size: .8rem; font-weight: 400; color: #ff8a80; }
   .processing { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.25rem 1.5rem; margin-bottom: 2rem; }
   .proc-item { padding: .5rem 0; }
   .proc-item .proc-label { font-size: .9rem; margin-bottom: .4rem; }
@@ -53,7 +54,12 @@
   {% endwith %}
 
   <div class="shared-folders">
-    <h2 style="margin-top:0">Projects</h2>
+    <h2 style="margin-top:0">
+      Projects
+      {% if project_groups %}
+        <a class="danger-link delete-all" href="{{ url_for('delete_all_projects') }}">Delete all&hellip;</a>
+      {% endif %}
+    </h2>
     {% if not project_groups %}
       <p class="empty">No projects yet.</p>
     {% endif %}
