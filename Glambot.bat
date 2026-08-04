@@ -3,6 +3,27 @@ setlocal
 title Glambot
 cd /d "%~dp0"
 
+rem This script only works from inside the Glambot folder - every path below
+rem is relative to its own location. Copying it somewhere else (the Desktop,
+rem say) would otherwise silently build a stray virtualenv there and then
+rem fail on the missing requirements.txt. Checked before anything is created.
+set "GLAMBOT_OK=1"
+if not exist "requirements.txt" set "GLAMBOT_OK="
+if not exist "glambot\pipeline.py" set "GLAMBOT_OK="
+if not defined GLAMBOT_OK (
+    echo.
+    echo This file has to stay in the Glambot folder - it could not find
+    echo requirements.txt and glambot\pipeline.py next to it.
+    echo.
+    echo Looked in: "%CD%"
+    echo.
+    echo For a Desktop launcher, use a shortcut or a small .bat that calls
+    echo this one, rather than a copy of it.
+    echo.
+    pause
+    exit /b 1
+)
+
 if not exist .venv (
     echo Creating virtualenv - first run may take a minute...
     python -m venv .venv
@@ -17,7 +38,9 @@ if not exist .venv (
 
 call .venv\Scripts\activate.bat
 
-pip install -q -r requirements.txt
+rem --disable-pip-version-check: a "new release of pip is available" notice on
+rem every launch is noise, and it misleads - it looks like a Glambot problem.
+pip install -q --disable-pip-version-check -r requirements.txt
 if errorlevel 1 (
     echo.
     echo Failed to install dependencies. Check your internet connection and try again.

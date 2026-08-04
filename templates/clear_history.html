@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glambot &mdash; Clear history</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  body { max-width: 640px; margin: 3rem auto; padding: 0 1.5rem 3rem; }
+  .panel { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.5rem; }
+  .count { font-size: 2rem; font-weight: 600; }
+  .note { color: var(--text-secondary); font-size: .9rem; }
+  .actions { display: flex; gap: .75rem; align-items: center; margin-top: 1.5rem; }
+  .job-list { list-style: none; padding: 0; margin: 1rem 0 0; max-height: 220px; overflow-y: auto; font-size: .85rem; color: var(--text-secondary); }
+  .job-list li { padding: .3rem 0; border-bottom: 1px solid var(--border); }
+</style>
+</head>
+<body>
+  <h1>Clear history for &ldquo;{{ project }}&rdquo;?</h1>
+
+  <div class="panel">
+    <p class="count">{{ jobs | length }} job record{{ '' if jobs | length == 1 else 's' }}</p>
+    <p class="note">
+      This removes the job records only. <strong>No files are deleted</strong> &mdash;
+      every rendered clip and every original stays exactly where it is on disk.
+    </p>
+    <p class="note">
+      One side effect worth knowing: Glambot tracks what it has already processed
+      through these records. Any footage still sitting in this project&rsquo;s import
+      folder will be picked up and processed again after clearing.
+    </p>
+
+    {% if jobs %}
+      <ul class="job-list">
+        {% for job in jobs %}
+          <li>{{ job.filename }} &mdash; {{ job.status }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    <form method="post" class="actions"
+          onsubmit="return confirm('Clear {{ jobs | length }} job record(s) for {{ project }}? This cannot be undone.');">
+      <input type="hidden" name="confirm" value="yes">
+      <button type="submit" {{ 'disabled' if not jobs }}>Clear history</button>
+      <a href="{{ url_for('index') }}">Cancel</a>
+    </form>
+  </div>
+</body>
+</html>

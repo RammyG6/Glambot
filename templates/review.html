@@ -17,6 +17,8 @@
   .shared-folder li button { margin: 0; padding: .3rem .8rem; font-size: .78rem; }
   .shared-folder li a { font-size: .78rem; white-space: nowrap; }
   .shared-folder li .config-error { color: #ff8a80; font-size: .78rem; cursor: help; }
+  .shared-folder .shared-note { color: var(--accent); }
+  .shared-folder li a.danger-link { color: #ff8a80; }
   .processing { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.25rem 1.5rem; margin-bottom: 2rem; }
   .proc-item { padding: .5rem 0; }
   .proc-item .proc-label { font-size: .9rem; margin-bottom: .4rem; }
@@ -57,7 +59,10 @@
     {% endif %}
     {% for pg in project_groups %}
       <div class="shared-folder">
-        {% if pg.shared %}<div class="path"><code>{{ pg.folder }}</code></div>{% endif %}
+        <div class="path">
+          <code>{{ pg.folder }}</code>
+          {% if pg.shared %}<span class="shared-note">· shared by {{ pg.projects | length }} projects</span>{% endif %}
+        </div>
         <ul>
           {% for p in pg.projects %}
             <li class="{{ 'active' if pg.shared and p == pg.active else '' }}">
@@ -72,6 +77,8 @@
               {% endif %}
               <a href="{{ url_for('kiosk_live', project=p) }}">Kiosk monitor &rarr;</a>
               <a href="{{ url_for('edit_project_form', project=p) }}">Edit settings</a>
+              <a href="{{ url_for('clear_history', project=p) }}">Clear history</a>
+              <a class="danger-link" href="{{ url_for('delete_project', project=p) }}">Delete</a>
             </li>
           {% endfor %}
         </ul>
@@ -169,7 +176,17 @@
     <h2>Errors</h2>
     <ul class="error-list">
       {% for job in error_jobs %}
-        <li>{{ job.project }} / {{ job.filename }} — {{ job.error }}</li>
+        <li>
+          <div class="error-what">{{ job.project }} / {{ job.filename }}</div>
+          <div class="error-why">{{ job.error }}</div>
+          {% if job.can_rerender %}
+            <form method="post" action="{{ url_for('rerender', job_id=job.id) }}">
+              <button type="submit" class="secondary">Re-render</button>
+            </form>
+          {% else %}
+            <div class="error-why">Source file is gone - cannot re-render.</div>
+          {% endif %}
+        </li>
       {% endfor %}
     </ul>
   {% endif %}

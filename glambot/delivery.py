@@ -18,10 +18,22 @@ from .config import ProjectConfig
 from .db import Job, JobStore
 from .drive import upload_and_share
 from .emailer import send_delivery_email
-from .processor import QR_APPROVED_SUBDIR, QR_DOWNLOAD_SUBDIR, SENT_SUBDIR, resolve_output_base
+from .processor import (
+    QR_APPROVED_SUBDIR,
+    QR_DOWNLOAD_SUBDIR,
+    SENT_SUBDIR,
+    resolve_output_base,
+    verify_output,
+)
 from .qr import make_delivery_photo, make_qr_data_uri
 
 logger = logging.getLogger(__name__)
+
+
+class DeliveryError(Exception):
+    """Delivery was refused before anything left the machine — as opposed to
+    DriveError/EmailError, which mean an upload or send was attempted and
+    failed."""
 
 
 @dataclass
@@ -73,6 +85,15 @@ def deliver(job: Job, config: ProjectConfig, store: JobStore, inbox_dir: Path, *
     to surface/retry, but never leaves the job half-delivered."""
     delivery_mode = delivery_mode or job.delivery_mode or "email"
     folder_id = config.drive_folder_id or os.environ.get("DRIVE_FOLDER_ID", "")
+
+    # Last gate before the clip leaves the machine. process_job() already
+    # verified this render, but a job can sit as `ready` for a long time and
+    # be delivered manually much later, by which point the file may have been
+    # truncated, half-synced or replaced. Uploading a broken clip to a
+    # customer is far worse than failing here.
+    ok, reason = verify_output(Path(job.output_path), None)
+    if not ok:
+        raise DeliveryError(f"Refusing to deliver job {job.id}: {reason}")
 
     if job.drive_link:
         # Already uploaded (e.g. the qr_only pre-upload-on-ready step) — no

@@ -1,4 +1,4 @@
-"""SQLite-backed job store.
+r"""SQLite-backed job store.
 
 A "job" is one piece of footage moving through the pipeline:
 
@@ -45,6 +45,10 @@ _NEW_COLUMNS = [
     ("secondary_output_path", "TEXT"),
     ("secondary_drive_link", "TEXT"),
     ("progress", "INTEGER"),
+    # Identifies the footage itself rather than where it happens to sit, so
+    # the same clip arriving at a second path (re-uploaded by FTP, renamed,
+    # moved) isn't processed twice. See content_hash() in processor.py.
+    ("content_hash", "TEXT"),
 ]
 
 
@@ -91,6 +95,7 @@ class Job:
     secondary_output_path: Optional[str] = None
     secondary_drive_link: Optional[str] = None
     progress: Optional[int] = None
+    content_hash: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Job":
@@ -117,14 +122,16 @@ class JobStore:
 
     def create_job(self, project: str, filename: str, source_path: str,
                     recipient_email: Optional[str] = None,
-                    delivery_mode: str = "email") -> Job:
+                    delivery_mode: str = "email",
+                    content_hash: Optional[str] = None) -> Job:
         now = _now()
         with self._connect() as conn:
             cur = conn.execute(
                 """INSERT INTO jobs (project, filename, source_path, status,
-                       recipient_email, delivery_mode, created_at, updated_at)
-                   VALUES (?, ?, ?, 'processing', ?, ?, ?, ?)""",
-                (project, filename, source_path, recipient_email, delivery_mode, now, now),
+                       recipient_email, delivery_mode, content_hash, created_at, updated_at)
+                   VALUES (?, ?, ?, 'processing', ?, ?, ?, ?, ?)""",
+                (project, filename, source_path, recipient_email, delivery_mode,
+                 content_hash, now, now),
             )
             job_id = cur.lastrowid
         return self.get_job(job_id)
@@ -138,6 +145,22 @@ class JobStore:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM jobs WHERE source_path = ?", (source_path,)
+            ).fetchone()
+        return Job.from_row(row) if row else None
+
+    def find_by_hash(self, content_hash: str, project: str) -> Optional[Job]:
+        """An existing job for this exact footage under this same project.
+
+        Deliberately scoped per-project rather than globally: pointing a
+        second project at one import folder to export a different format is
+        a supported setup, and that project must still get its own job for
+        the same clip. What this stops is one project rendering the same
+        footage twice because it turned up at a new path."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM jobs WHERE content_hash = ? AND project = ?
+                   ORDER BY id LIMIT 1""",
+                (content_hash, project),
             ).fetchone()
         return Job.from_row(row) if row else None
 
@@ -215,6 +238,24 @@ class JobStore:
         if secondary_drive_link is not None:
             fields["secondary_drive_link"] = secondary_drive_link
         return self.update_job(job_id, **fields)
+
+    def delete_jobs_for_project(self, project: str) -> int:
+        """Drop this project's job history. Returns how many rows went.
+
+        Only touches the DB — every rendered file stays on disk. Clearing
+        history also un-remembers which clips were already processed, so
+        footage still sitting in the import folder will be picked up again."""
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM jobs WHERE project = ?", (project,))
+            return cur.rowcount
+
+    def forget_project(self, project: str) -> None:
+        """Remove every trace of a project from the DB: its jobs, plus any
+        folder it was the active owner of (otherwise a deleted project keeps
+        a shared folder pinned to a project that no longer exists)."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM jobs WHERE project = ?", (project,))
+            conn.execute("DELETE FROM folder_ownership WHERE active_project = ?", (project,))
 
     def get_active_project(self, folder_path: str) -> Optional[str]:
         with self._connect() as conn:
