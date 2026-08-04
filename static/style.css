@@ -192,6 +192,10 @@ button.secondary:hover { background: #3a3a3c; }
   border-bottom: 1px solid var(--border);
 }
 .error-list li { color: #ff8a80; }
+.error-list .error-what { font-weight: 600; }
+.error-list .error-why { color: var(--text-secondary); margin: .15rem 0 .4rem; word-break: break-word; }
+.error-list li form { margin: 0; }
+.error-list li button { margin: 0; padding: .3rem .8rem; font-size: .78rem; }
 
 code {
   background: var(--bg-elevated-2);

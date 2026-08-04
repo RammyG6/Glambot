@@ -14,6 +14,8 @@ import logging
 import math
 import os
 import re
+import shutil
+import threading
 from pathlib import Path
 from uuid import uuid4
 
@@ -30,7 +32,7 @@ from .config import (
     save_config,
 )
 from .db import Job, JobStore
-from .delivery import deliver
+from .delivery import DeliveryError, deliver
 from .drive import DriveError
 from .emailer import EmailError, load_default_template, resolve_placeholders, send_delivery_email
 from .folders import all_project_dirs, group_by_folder, project_watch_dirs
@@ -74,7 +76,14 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
     @app.get("/")
     def index():
         inbox_dir = app.config["INBOX_DIR"]
-        error_jobs = store.list_jobs(status="error")
+        # Re-render is only offerable while the original is still on disk.
+        # process_job() skips archiving whenever its integrity check fails,
+        # so that's exactly the case these buttons are for.
+        error_jobs = [
+            {"id": j.id, "project": j.project, "filename": j.filename, "error": j.error,
+             "can_rerender": bool(j.source_path) and Path(j.source_path).exists()}
+            for j in store.list_jobs(status="error")
+        ]
         sent_jobs = store.list_jobs(status="sent")[:20]
         processing_jobs = store.list_jobs(status="processing")
 
@@ -232,7 +241,7 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
                 job, config, store, app.config["INBOX_DIR"],
                 recipient=recipient, subject=subject, body=body, delivery_mode=delivery_mode,
             )
-        except (DriveError, EmailError) as exc:
+        except (DriveError, EmailError, DeliveryError) as exc:
             logger.exception("Delivery failed for job %s", job_id)
             # Leave status as "ready" (not "error") so the clip stays in the
             # approval queue and can simply be retried once the underlying
@@ -255,6 +264,39 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
             return redirect(url_for("index"))
         store.mark_rejected(job_id)
         flash(f"Rejected {job.filename}.", "info")
+        return redirect(url_for("index"))
+
+    @app.post("/jobs/<int:job_id>/rerender")
+    def rerender(job_id):
+        """Re-run the render for a job that failed — typically one whose
+        output came out truncated. process_job() skips archiving the original
+        when its integrity check fails, so the source is still sitting in the
+        import folder and can simply be run again."""
+        job = store.get_job(job_id)
+        if job is None:
+            flash("Job not found.", "error")
+            return redirect(url_for("index"))
+        source = Path(job.source_path)
+        if not source.exists():
+            flash(
+                f"Cannot re-render {job.filename}: the source file is no longer at "
+                f"{job.source_path}.", "error",
+            )
+            return redirect(url_for("index"))
+        try:
+            config = load_config(app.config["INBOX_DIR"] / job.project)
+        except ConfigError as exc:
+            flash(f"Config problem: {exc}", "error")
+            return redirect(url_for("index"))
+
+        store.update_job(job_id, status="processing", error=None, progress=0)
+        # Runs on a worker thread so the browser gets its redirect straight
+        # away instead of holding the request open for the whole render.
+        threading.Thread(
+            target=_rerender_worker, args=(store.get_job(job_id), config, store),
+            daemon=True,
+        ).start()
+        flash(f"Re-rendering {job.filename}...", "info")
         return redirect(url_for("index"))
 
     @app.post("/jobs/<int:job_id>/retry_delivery")
@@ -287,7 +329,7 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
                 recipient=config.recipient_email or None,
                 subject=subject, body=body, delivery_mode=config.delivery_mode,
             )
-        except (DriveError, EmailError) as exc:
+        except (DriveError, EmailError, DeliveryError) as exc:
             logger.exception("Retry delivery failed for job %s", job_id)
             store.update_job(job_id, error=f"Auto-delivery failed: {exc}")
             flash(f"Delivery still failing: {exc}", "error")
@@ -431,6 +473,63 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         )
         return redirect(url_for("index"))
 
+    def _resolve_project(project: str) -> Path:
+        """Project dir for a name from the URL, 404ing on anything that
+        isn't a real project. _safe_project_name also blocks path traversal
+        (".."/separators) before the name is ever joined to a path."""
+        safe = _safe_project_name(project)
+        if not safe or safe != project:
+            abort(404)
+        project_dir = app.config["INBOX_DIR"] / safe
+        if not (project_dir / "config.json").exists():
+            abort(404)
+        return project_dir
+
+    @app.route("/projects/<project>/clear-history", methods=["GET", "POST"])
+    def clear_history(project):
+        """Wipe a project's job rows. Files on disk are untouched, so this is
+        recoverable in the sense that nothing rendered is lost — but it does
+        make already-processed footage eligible for processing again."""
+        _resolve_project(project)
+        jobs = store.list_jobs(project=project)
+        if request.method == "GET":
+            return render_template("clear_history.html", project=project, jobs=jobs)
+        if request.form.get("confirm") != "yes":
+            flash("Clear history cancelled.", "info")
+            return redirect(url_for("index"))
+        removed = store.delete_jobs_for_project(project)
+        flash(f"Cleared {removed} job record(s) for '{project}'. No files were deleted.", "info")
+        return redirect(url_for("index"))
+
+    @app.route("/projects/<project>/delete", methods=["GET", "POST"])
+    def delete_project(project):
+        """Delete a project and its files. Irreversible, so the confirmation
+        page lists every path that will go before anything is touched, and
+        the POST needs both the password and the typed project name."""
+        project_dir = _resolve_project(project)
+        targets = _deletion_targets(app.config["INBOX_DIR"], project, project_dir, store)
+
+        if request.method == "GET":
+            return render_template("delete_project.html", project=project, targets=targets)
+
+        if request.form.get("password", "") != _delete_password():
+            flash("Wrong password - nothing was deleted.", "error")
+            return redirect(url_for("delete_project", project=project))
+        if request.form.get("confirm_name", "").strip() != project:
+            flash("Project name did not match - nothing was deleted.", "error")
+            return redirect(url_for("delete_project", project=project))
+
+        removed, failed = _delete_paths(t["path"] for t in targets if t["will_delete"])
+        store.forget_project(project)
+        if failed:
+            flash(
+                f"Deleted '{project}', but {len(failed)} path(s) could not be removed: "
+                + "; ".join(failed), "error",
+            )
+        else:
+            flash(f"Deleted project '{project}' and {removed} path(s).", "info")
+        return redirect(url_for("index"))
+
     @app.get("/projects/<project>/edit")
     def edit_project_form(project):
         inbox_dir = app.config["INBOX_DIR"]
@@ -541,6 +640,93 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         return redirect(url_for("index"))
 
     return app
+
+
+def _delete_password() -> str:
+    """Guard against a misclick, not a security control - the default is
+    visible in this source file and the app binds to localhost. It exists so
+    that deleting a project takes deliberate typing."""
+    return os.environ.get("GLAMBOT_DELETE_PASSWORD", "glambot")
+
+
+def _deletion_targets(inbox_dir: Path, project: str, project_dir: Path,
+                      store: JobStore) -> list[dict]:
+    """Every path deleting `project` would touch, each flagged with whether
+    it will actually be removed and why.
+
+    The important case this handles: a footage folder shared with another
+    project must never be emptied. Deleting one project cannot be allowed to
+    destroy another project's incoming footage, so a shared source folder is
+    listed as skipped rather than silently spared or silently wiped."""
+    targets: list[dict] = []
+    seen: set[Path] = set()
+
+    def add(path: Path, label: str, will_delete: bool, note: str = "") -> None:
+        resolved = path.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        targets.append({
+            "path": resolved, "label": label, "will_delete": will_delete,
+            "note": note, "exists": resolved.exists(),
+        })
+
+    add(project_dir, "Project folder (config, overlays, soundtrack)", True)
+
+    try:
+        config = load_config(project_dir)
+    except ConfigError:
+        config = None
+
+    if config is not None:
+        from .processor import resolve_output_base
+        output_base = resolve_output_base(project_dir, config)
+        # When no custom output_dir is set this IS the project folder, which
+        # add() already deduplicates away.
+        add(output_base, "Rendered output folder", True)
+
+        source = config.source_dir
+        if source is not None:
+            others = sorted(
+                name for name, folder in project_watch_dirs(inbox_dir).items()
+                if name != project and folder.resolve() == source.resolve()
+            )
+            if others:
+                add(source, "Footage source folder", False,
+                    f"shared with {', '.join(others)} - left untouched")
+            else:
+                add(source, "Footage source folder (imported clips)", True)
+    return targets
+
+
+def _delete_paths(paths) -> tuple[int, list[str]]:
+    """Delete each path, collecting failures rather than aborting partway --
+    a locked file must not leave the rest of a confirmed deletion undone."""
+    removed, failed = 0, []
+    for path in paths:
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+                removed += 1
+            elif path.exists():
+                path.unlink()
+                removed += 1
+        except OSError as exc:
+            logger.warning("Could not delete %s", path, exc_info=True)
+            failed.append(f"{path} ({exc.strerror or exc})")
+    return removed, failed
+
+
+def _rerender_worker(job: Job, config, store: JobStore) -> None:
+    """Run one job's render off the request thread. process_job imports
+    lazily here because processor.py pulls in ffmpeg helpers that the web
+    app doesn't otherwise need."""
+    from .processor import process_job
+    try:
+        process_job(job, config, store)
+    except Exception as exc:
+        logger.exception("Re-render failed for job %s", job.id)
+        store.mark_error(job.id, f"Re-render failed: {exc}")
 
 
 def _compute_project_groups(inbox_dir: Path, store: JobStore) -> list[dict]:

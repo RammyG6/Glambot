@@ -1,6 +1,7 @@
 """Turn raw footage into a trimmed, overlaid, compressed clip via ffmpeg."""
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
@@ -73,6 +74,36 @@ _ROTATION_FILTERS = {
 
 def is_footage_file(path: Path) -> bool:
     return path.suffix.lower() in VIDEO_EXTENSIONS
+
+
+# How much of each end of a file feeds the content hash. Video files differ
+# in their first megabyte (container header, moov atom, first frames) far
+# more reliably than they collide in it, so sampling the ends plus the exact
+# byte length identifies a clip without reading gigabytes off disk.
+_HASH_SAMPLE_BYTES = 1024 * 1024
+
+
+def content_hash(path: Path) -> str | None:
+    """Identify footage by its bytes rather than its path, so the same clip
+    arriving somewhere new isn't mistaken for a different one.
+
+    Hashes the file's length plus its first and last megabyte. Full-file
+    hashing would mean reading every byte of multi-GB footage before any
+    render could start; this is fast enough to sit inline in the watcher.
+    Returns None if the file can't be read, in which case callers fall back
+    to path-based dedup rather than blocking the clip."""
+    try:
+        size = path.stat().st_size
+        digest = hashlib.sha256(str(size).encode())
+        with open(path, "rb") as handle:
+            digest.update(handle.read(_HASH_SAMPLE_BYTES))
+            if size > _HASH_SAMPLE_BYTES * 2:
+                handle.seek(-_HASH_SAMPLE_BYTES, os.SEEK_END)
+                digest.update(handle.read(_HASH_SAMPLE_BYTES))
+        return digest.hexdigest()
+    except OSError:
+        logger.warning("Could not hash %s for duplicate detection", path, exc_info=True)
+        return None
 
 
 # ffprobe (used for the progress bar's total duration and audio-stream
@@ -357,6 +388,51 @@ def _make_thumbnail(output_path: Path, thumbnail_path: Path, ffmpeg_bin: str) ->
     return result.returncode == 0 and thumbnail_path.exists()
 
 
+# A render shorter than this fraction of what was asked for is treated as
+# truncated. Encoders legitimately land a little short (frame-rate rounding,
+# a dropped trailing partial frame), so the tolerance is generous — this is
+# looking for a render that stopped early, not for a rounding error.
+_DURATION_TOLERANCE = 0.05
+_MIN_OUTPUT_BYTES = 1024
+
+
+def verify_output(output_path: Path, expected_duration: float | None) -> tuple[bool, str]:
+    """Check a finished render is actually playable before anything acts on
+    it. Returns (ok, reason); `reason` is empty when ok.
+
+    A killed or stalled ffmpeg still leaves a file behind, and an mp4
+    truncated mid-write opens fine in some players — so file existence alone
+    proves nothing. Probing the duration is what distinguishes a complete
+    render from one that stopped early, and it reads headers rather than
+    decoding, so it costs milliseconds."""
+    if not output_path.exists():
+        return False, "render produced no output file"
+    size = output_path.stat().st_size
+    if size < _MIN_OUTPUT_BYTES:
+        return False, f"render produced an empty output file ({size} bytes)"
+
+    actual = _probe_duration(output_path)
+    if actual is None:
+        # ffprobe missing is not the file's fault; ffprobe *failing* on a
+        # file that exists means it isn't valid video.
+        if shutil.which(_FFPROBE) is None and not Path(_FFPROBE).exists():
+            logger.warning("ffprobe unavailable - skipping integrity check for %s", output_path)
+            return True, ""
+        return False, "rendered file is not readable as video (ffprobe could not parse it)"
+    if actual <= 0:
+        return False, "rendered file has zero duration"
+
+    if expected_duration:
+        shortfall = expected_duration - actual
+        allowed = max(1.0, expected_duration * _DURATION_TOLERANCE)
+        if shortfall > allowed:
+            return False, (
+                f"render is truncated: {actual:.1f}s of an expected "
+                f"{expected_duration:.1f}s"
+            )
+    return True, ""
+
+
 def _archive_original(source_path: Path) -> None:
     """Move a processed original out of its import folder into an
     "Edited Footages" subfolder (excluded from watching). Best-effort — a
@@ -430,6 +506,15 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
         store.mark_error(job.id, f"ffmpeg failed: {tail}")
         return
 
+    ok, reason = verify_output(output_path, duration)
+    if not ok:
+        logger.error("Integrity check failed for job %s: %s", job.id, reason)
+        # Deliberately NOT archiving the original: leaving it in the import
+        # folder is what makes the "Re-render" button in the review UI able
+        # to run this job again from source.
+        store.mark_error(job.id, reason)
+        return
+
     secondary_output_path: Path | None = None
     if config.second_resolution:
         secondary_output_path = (
@@ -450,6 +535,14 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
             logger.error("Second-resolution ffmpeg failed for job %s: %s", job.id, second_tail)
             # Non-fatal: the primary output is still good, just drop the second one.
             secondary_output_path = None
+        else:
+            second_ok, second_reason = verify_output(secondary_output_path, duration)
+            if not second_ok:
+                # Same reasoning as above — a bad second render must not sink
+                # a good primary one, so drop it rather than failing the job.
+                logger.error("Second-resolution integrity check failed for job %s: %s",
+                             job.id, second_reason)
+                secondary_output_path = None
 
     thumbnail_path = output_path.with_suffix(THUMBNAIL_SUFFIX)
     thumb_ok = _make_thumbnail(output_path, thumbnail_path, ffmpeg_bin)
@@ -489,7 +582,7 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
         # default recipient + the default email template. A failure here
         # is non-fatal — the job simply stays `ready` with an error note,
         # same as any other failed delivery, so it can be approved manually.
-        from .delivery import deliver
+        from .delivery import DeliveryError, deliver
         from .emailer import load_default_template, resolve_placeholders
 
         subject, body = "", ""
@@ -504,6 +597,6 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
         try:
             deliver(job, config, store, project_dir.parent, recipient=config.recipient_email,
                     subject=subject, body=body, delivery_mode=config.delivery_mode)
-        except (DriveError, EmailError) as exc:
+        except (DriveError, EmailError, DeliveryError) as exc:
             logger.exception("Auto-delivery failed for job %s", job.id)
             store.update_job(job.id, error=f"Auto-delivery failed: {exc}")

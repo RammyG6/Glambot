@@ -25,7 +25,7 @@ from watchdog.observers import Observer
 from .config import MANAGED_SUBDIRS, ConfigError, load_config, managed_subdir_in
 from .db import JobStore
 from .folders import group_by_folder, project_watch_dirs
-from .processor import is_footage_file, process_job
+from .processor import content_hash, is_footage_file, process_job
 
 _EXCLUDED_SUBDIRS = MANAGED_SUBDIRS
 
@@ -321,7 +321,21 @@ class InboxWatcher:
 
         job = self.store.find_by_source(source_path)
         if job is None:
-            job = self.store.create_job(project=project, filename=path.name, source_path=source_path)
+            # No job for this path — but the same footage may already have
+            # been processed for this project under a different path (an FTP
+            # client re-uploading, a rename, a file moved between folders).
+            # Hash-matching catches that; path-matching alone cannot.
+            digest = content_hash(path)
+            if digest is not None:
+                duplicate = self.store.find_by_hash(digest, project)
+                if duplicate is not None:
+                    logger.info(
+                        "Skipping %s: identical footage already processed for %s as job %s (%s)",
+                        path, project, duplicate.id, duplicate.filename,
+                    )
+                    return
+            job = self.store.create_job(project=project, filename=path.name,
+                                        source_path=source_path, content_hash=digest)
         elif job.project != project:
             # The folder's active project changed since this file was last
             # processed (or the old project was deleted). Re-attribute the
