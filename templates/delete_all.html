@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glambot &mdash; Delete all projects</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  body { max-width: 820px; margin: 3rem auto; padding: 0 1.5rem 3rem; }
+  .panel { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.5rem; }
+  .danger { border-color: #ff8a80; }
+  .warn { color: #ff8a80; font-weight: 600; }
+  .note { color: var(--text-secondary); font-size: .9rem; }
+  .proj { padding: 1rem 0; border-bottom: 1px solid var(--border); }
+  .proj:last-of-type { border-bottom: none; }
+  .proj h2 { font-size: 1rem; margin: 0 0 .1rem; }
+  .proj .jobs { color: var(--text-secondary); font-size: .82rem; margin-bottom: .6rem; }
+  .targets { list-style: none; padding: 0; margin: 0; }
+  .targets li { padding: .4rem 0; font-size: .86rem; }
+  .targets label { display: flex; gap: .6rem; align-items: flex-start; cursor: pointer; }
+  .targets input { margin-top: .25rem; flex: 0 0 auto; }
+  .targets .label { font-weight: 600; }
+  .targets code { display: inline-block; word-break: break-all; margin: .15rem 0; }
+  .targets .footage .label { color: #ff8a80; }
+  .bulk { display: flex; gap: .75rem; margin: 0 0 1rem; }
+  .bulk button { margin: 0; padding: .3rem .8rem; font-size: .78rem; }
+  .field { margin: 1.25rem 0 0; }
+  .field label { display: block; font-size: .85rem; margin-bottom: .3rem; }
+  .field input { width: 100%; max-width: 320px; }
+  .actions { display: flex; gap: .75rem; align-items: center; margin-top: 1.25rem; }
+</style>
+</head>
+<body>
+  <h1>Delete all projects</h1>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <p class="{{ 'warn' if category == 'error' else 'note' }}">{{ message }}</p>
+    {% endfor %}
+  {% endwith %}
+
+  {% if not groups %}
+    <div class="panel"><p class="note">There are no projects to delete.</p>
+    <p><a href="{{ url_for('index') }}">&larr; Back</a></p></div>
+  {% else %}
+  <div class="panel danger">
+    <p class="warn">This is irreversible. Only the ticked paths are deleted.</p>
+    <p class="note">
+      Footage source folders start <strong>unticked</strong> &mdash; those hold the
+      original clips your camera or FTP delivered, which Glambot cannot recreate.
+      Tick one only if you really want the raw footage gone too.
+    </p>
+
+    <form method="post"
+          onsubmit="return confirm('Permanently delete every ticked path? This cannot be undone.');">
+      <div class="bulk">
+        <button type="button" class="secondary" id="selAll">Select all</button>
+        <button type="button" class="secondary" id="selNone">Select none</button>
+        <button type="button" class="secondary" id="selSafe">Projects + outputs only</button>
+      </div>
+
+      {% for g in groups %}
+        <div class="proj">
+          <h2>{{ g.project }}</h2>
+          <div class="jobs">{{ g.job_count }} job record{{ '' if g.job_count == 1 else 's' }}</div>
+          <ul class="targets">
+            {% for t in g.targets %}
+              <li class="{{ t.kind }}">
+                <label>
+                  <input type="checkbox" name="paths" value="{{ t.path }}"
+                         data-kind="{{ t.kind }}" {{ 'checked' if t.default_checked }}>
+                  <span>
+                    <span class="label">{{ t.label }}</span><br>
+                    <code>{{ t.path }}</code>
+                    {% if t.note %}<div class="note">{{ t.note }}</div>{% endif %}
+                    {% if not t.exists %}<div class="note">(does not exist &mdash; nothing to delete)</div>{% endif %}
+                  </span>
+                </label>
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endfor %}
+
+      <div class="field">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="off" required>
+      </div>
+      <div class="actions">
+        <button type="submit">Delete ticked paths</button>
+        <a href="{{ url_for('index') }}">Cancel</a>
+      </div>
+    </form>
+  </div>
+  {% endif %}
+
+  <script>
+    (function () {
+      var boxes = function () { return document.querySelectorAll('input[name="paths"]'); };
+      function setAll(fn) {
+        Array.prototype.forEach.call(boxes(), function (b) { b.checked = fn(b); });
+      }
+      var all = document.getElementById('selAll');
+      var none = document.getElementById('selNone');
+      var safe = document.getElementById('selSafe');
+      if (all) all.addEventListener('click', function () { setAll(function () { return true; }); });
+      if (none) none.addEventListener('click', function () { setAll(function () { return false; }); });
+      if (safe) safe.addEventListener('click', function () {
+        setAll(function (b) { return b.dataset.kind !== 'footage'; });
+      });
+    })();
+  </script>
+</body>
+</html>

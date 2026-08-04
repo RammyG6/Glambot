@@ -20,7 +20,11 @@
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; }
   @media (max-width: 1100px) { .layout { flex-direction: column; } .play-col { position: static; width: 100%; } .grid { grid-template-columns: repeat(4, 1fr); } }
   @media (max-width: 700px) { .grid { grid-template-columns: repeat(2, 1fr); } }
-  .clip { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.1rem; text-align: center; }
+  .clip { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.1rem; text-align: center; cursor: pointer; transition: border-color .15s ease, background .15s ease; }
+  .clip:hover { border-color: var(--accent); }
+  .clip.selected { background: rgba(0, 113, 227, 0.18); border-color: var(--accent); }
+  .clip.selected .name { color: var(--accent); font-weight: 600; }
+  .play-col .back-live { display: block; width: 100%; margin-top: .8rem; }
   .clip .thumb { width: 100%; max-height: 300px; object-fit: contain; border-radius: var(--radius); margin-bottom: .9rem; }
   .clip .qr-row { display: flex; gap: .9rem; justify-content: center; }
   .clip .qr-wrap { background: #fff; padding: .7rem; border-radius: var(--radius-sm); }
@@ -37,7 +41,8 @@
     <div class="grid-col">
       <div class="grid" id="grid">
         {% for item in items %}
-          <div class="clip">
+          <div class="clip{{ ' selected' if item.job.id == latest_id }}" data-id="{{ item.job.id }}"
+               role="button" tabindex="0" title="Play this clip">
             <img class="thumb" src="{{ url_for('thumbnail', job_id=item.job.id) }}" alt="Clip"
                  onerror="this.style.display='none'">
             <div class="qr-row">
@@ -63,6 +68,9 @@
       <video id="player" autoplay muted loop playsinline
              {% if latest_id %}src="{{ url_for('video', job_id=latest_id) }}"{% endif %}></video>
       <div class="now-playing" id="nowPlaying">{% if items %}{{ items[0].job.filename }}{% endif %}</div>
+      <button type="button" class="secondary back-live" id="backLive" style="display:none">
+        &#9654; Back to live (newest clip)
+      </button>
     </div>
   </div>
 
@@ -75,17 +83,69 @@
       var grid = document.getElementById('grid');
       var player = document.getElementById('player');
       var nowPlaying = document.getElementById('nowPlaying');
-      var currentLatest = {{ latest_id if latest_id else 'null' }};
+      var backLive = document.getElementById('backLive');
+
+      // Three separate pieces of state. Collapsing "newest clip known" and
+      // "what is playing" into one variable is what would let the 5-second
+      // poll silently steal a clip the operator deliberately picked.
+      var latestKnownId = {{ latest_id if latest_id else 'null' }};  // newest delivered
+      var selectedId = latestKnownId;                                // actually playing
+      var following = true;                                          // auto-advance?
       var renderedIds = null;
+      var clipsById = {};
 
       function clipHtml(c) {
         var qr2 = c.qr2 ? '<div class="qr-wrap"><img src="' + c.qr2 + '"><div class="qr-label">V2</div></div>' : '';
         var v1label = c.qr2 ? '<div class="qr-label">V1</div>' : '';
-        return '<div class="clip">' +
+        return '<div class="clip" data-id="' + c.id + '" role="button" tabindex="0" title="Play this clip">' +
           '<img class="thumb" src="/thumbnail/' + c.id + '" onerror="this.style.display=\'none\'">' +
           '<div class="qr-row"><div class="qr-wrap"><img src="' + c.qr + '">' + v1label + '</div>' + qr2 + '</div>' +
           '<div class="name">' + c.filename + '</div></div>';
       }
+
+      // The grid is rebuilt wholesale via innerHTML whenever the clip set
+      // changes, which throws away the selected class - so it is re-applied
+      // from state after every render rather than tracked on the nodes.
+      function paintSelection() {
+        var tiles = grid.querySelectorAll('.clip[data-id]');
+        Array.prototype.forEach.call(tiles, function (tile) {
+          var on = String(selectedId) === tile.dataset.id;
+          tile.classList.toggle('selected', on);
+        });
+        backLive.style.display = following ? 'none' : '';
+      }
+
+      function play(id, isManual) {
+        if (id == null) { return; }
+        selectedId = id;
+        following = !isManual;
+        player.src = '/video/' + id;
+        // Controls only once someone has deliberately chosen a clip: while
+        // auto-following this is a hands-off wall display.
+        player.controls = isManual;
+        player.load();
+        player.play().catch(function () {});
+        var clip = clipsById[id];
+        if (clip) { nowPlaying.textContent = clip.filename; }
+        paintSelection();
+      }
+
+      // Delegated: tiles are replaced on every re-render, so per-tile
+      // listeners would go stale.
+      grid.addEventListener('click', function (ev) {
+        var tile = ev.target.closest('.clip[data-id]');
+        if (tile) { play(Number(tile.dataset.id), true); }
+      });
+      grid.addEventListener('keydown', function (ev) {
+        if (ev.key !== 'Enter' && ev.key !== ' ') { return; }
+        var tile = ev.target.closest('.clip[data-id]');
+        if (tile) { ev.preventDefault(); play(Number(tile.dataset.id), true); }
+      });
+
+      backLive.addEventListener('click', function () {
+        following = true;
+        play(latestKnownId, false);
+      });
 
       function poll() {
         fetch('/projects/{{ project|urlencode }}/kiosk.json', { cache: 'no-store' })
@@ -94,24 +154,28 @@
             var clips = data.clips || [];
             if (!clips.length) { layout.style.display = 'none'; waiting.style.display = ''; return; }
             layout.style.display = ''; waiting.style.display = 'none';
+
+            clipsById = {};
+            clips.forEach(function (c) { clipsById[c.id] = c; });
+            latestKnownId = data.latest_id;
+
             // Re-render the grid only when the set of clips changes.
             var ids = clips.map(function (c) { return c.id; }).join(',');
             if (ids !== renderedIds) {
               grid.innerHTML = clips.map(clipHtml).join('');
               renderedIds = ids;
             }
-            // Swap the video only when a newer clip has arrived — never
-            // interrupt the currently-playing one otherwise.
-            if (data.latest_id && data.latest_id !== currentLatest) {
-              currentLatest = data.latest_id;
-              player.src = '/video/' + data.latest_id;
-              player.load();
-              player.play().catch(function () {});
-              nowPlaying.textContent = clips[0].filename;
+            paintSelection();
+
+            // Advance to a newer clip only while following. A manual pick
+            // stays put until the operator changes it or clicks Back to live.
+            if (following && latestKnownId && latestKnownId !== selectedId) {
+              play(latestKnownId, false);
             }
           })
           .catch(function () {});
       }
+      paintSelection();
       setInterval(poll, 5000);
     })();
   </script>

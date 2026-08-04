@@ -501,11 +501,55 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         flash(f"Cleared {removed} job record(s) for '{project}'. No files were deleted.", "info")
         return redirect(url_for("index"))
 
+    @app.route("/projects/delete-all", methods=["GET", "POST"])
+    def delete_all_projects():
+        """Delete every project, with a checkbox per path so nothing goes by
+        assumption. Footage folders start unticked."""
+        inbox_dir = app.config["INBOX_DIR"]
+        groups = _all_deletion_targets(inbox_dir, store)
+
+        if request.method == "GET":
+            return render_template("delete_all.html", groups=groups)
+
+        if request.form.get("password", "") != _delete_password():
+            flash("Wrong password - nothing was deleted.", "error")
+            return redirect(url_for("delete_all_projects"))
+
+        # The ticked paths are matched against the set just recomputed above,
+        # never used directly. Deleting whatever path strings arrive in the
+        # form would make this route an arbitrary-delete endpoint; a stale or
+        # tampered-with form can only ever select a subset of real targets.
+        allowed = {str(t["path"]): t for g in groups for t in g["targets"]}
+        chosen = [allowed[p] for p in request.form.getlist("paths") if p in allowed]
+        if not chosen:
+            flash("Nothing was selected - nothing was deleted.", "info")
+            return redirect(url_for("delete_all_projects"))
+
+        removed, failed = _delete_paths(t["path"] for t in chosen)
+
+        # Only forget a project whose own folder was actually removed -- if
+        # the user unticked it, the project still exists and must keep its
+        # job history.
+        chosen_paths = {t["path"] for t in chosen}
+        forgotten = []
+        for group in groups:
+            project_target = next((t for t in group["targets"] if t["kind"] == "project"), None)
+            if project_target is not None and project_target["path"] in chosen_paths:
+                store.forget_project(group["project"])
+                forgotten.append(group["project"])
+
+        summary = f"Deleted {removed} path(s) across {len(forgotten)} project(s)."
+        if failed:
+            flash(summary + f" {len(failed)} could not be removed: " + "; ".join(failed), "error")
+        else:
+            flash(summary, "info")
+        return redirect(url_for("index"))
+
     @app.route("/projects/<project>/delete", methods=["GET", "POST"])
     def delete_project(project):
         """Delete a project and its files. Irreversible, so the confirmation
         page lists every path that will go before anything is touched, and
-        the POST needs both the password and the typed project name."""
+        the POST needs the password."""
         project_dir = _resolve_project(project)
         targets = _deletion_targets(app.config["INBOX_DIR"], project, project_dir, store)
 
@@ -514,9 +558,6 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
 
         if request.form.get("password", "") != _delete_password():
             flash("Wrong password - nothing was deleted.", "error")
-            return redirect(url_for("delete_project", project=project))
-        if request.form.get("confirm_name", "").strip() != project:
-            flash("Project name did not match - nothing was deleted.", "error")
             return redirect(url_for("delete_project", project=project))
 
         removed, failed = _delete_paths(t["path"] for t in targets if t["will_delete"])
@@ -661,17 +702,17 @@ def _deletion_targets(inbox_dir: Path, project: str, project_dir: Path,
     targets: list[dict] = []
     seen: set[Path] = set()
 
-    def add(path: Path, label: str, will_delete: bool, note: str = "") -> None:
+    def add(path: Path, label: str, will_delete: bool, kind: str, note: str = "") -> None:
         resolved = path.resolve()
         if resolved in seen:
             return
         seen.add(resolved)
         targets.append({
             "path": resolved, "label": label, "will_delete": will_delete,
-            "note": note, "exists": resolved.exists(),
+            "kind": kind, "note": note, "exists": resolved.exists(),
         })
 
-    add(project_dir, "Project folder (config, overlays, soundtrack)", True)
+    add(project_dir, "Project folder (config, overlays, soundtrack)", True, "project")
 
     try:
         config = load_config(project_dir)
@@ -683,7 +724,7 @@ def _deletion_targets(inbox_dir: Path, project: str, project_dir: Path,
         output_base = resolve_output_base(project_dir, config)
         # When no custom output_dir is set this IS the project folder, which
         # add() already deduplicates away.
-        add(output_base, "Rendered output folder", True)
+        add(output_base, "Rendered output folder", True, "output")
 
         source = config.source_dir
         if source is not None:
@@ -692,11 +733,37 @@ def _deletion_targets(inbox_dir: Path, project: str, project_dir: Path,
                 if name != project and folder.resolve() == source.resolve()
             )
             if others:
-                add(source, "Footage source folder", False,
+                add(source, "Footage source folder", False, "footage",
                     f"shared with {', '.join(others)} - left untouched")
             else:
-                add(source, "Footage source folder (imported clips)", True)
+                add(source, "Footage source folder (imported clips)", True, "footage")
     return targets
+
+
+def _all_deletion_targets(inbox_dir: Path, store: JobStore) -> list[dict]:
+    """Per-project deletion targets for the delete-everything page.
+
+    Unlike the single-project page, sharing is not used to protect anything
+    here -- if every project is going, there is no surviving project left to
+    protect a shared folder for. Instead every path is offered as a checkbox
+    and footage folders start unticked, so raw footage is only ever deleted
+    by an explicit tick. Sharing is still reported, because seeing that one
+    folder feeds four projects is exactly what makes that tick a considered
+    one."""
+    groups = []
+    for project_dir in all_project_dirs(inbox_dir):
+        name = project_dir.name
+        targets = _deletion_targets(inbox_dir, name, project_dir, store)
+        for t in targets:
+            # Footage is the user's raw material and the one thing Glambot
+            # cannot regenerate, so it never starts ticked.
+            t["default_checked"] = t["kind"] != "footage"
+        groups.append({
+            "project": name,
+            "targets": targets,
+            "job_count": len(store.list_jobs(project=name)),
+        })
+    return groups
 
 
 def _delete_paths(paths) -> tuple[int, list[str]]:
