@@ -6,7 +6,6 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
   body { max-width: 640px; margin: 3rem auto; padding: 0 1.5rem 3rem; }
-  .panel { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.5rem; }
   .count { font-size: 2rem; font-weight: 600; }
   .note { color: var(--text-secondary); font-size: .9rem; }
   .actions { display: flex; gap: .75rem; align-items: center; margin-top: 1.5rem; }
@@ -40,8 +39,8 @@
     <form method="post" class="actions"
           onsubmit="return confirm('Clear {{ jobs | length }} job record(s) for {{ project }}? This cannot be undone.');">
       <input type="hidden" name="confirm" value="yes">
-      <button type="submit" {{ 'disabled' if not jobs }}>Clear history</button>
-      <a href="{{ url_for('index') }}">Cancel</a>
+      <button type="submit" class="btn btn-danger-ghost" {{ 'disabled' if not jobs }}>Clear history</button>
+      <a href="{{ url_for('index') }}" class="btn btn-ghost">Cancel</a>
     </form>
   </div>
 </body>

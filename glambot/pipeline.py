@@ -41,7 +41,7 @@ def main() -> None:
     watcher = InboxWatcher(inbox_dir, store)
     watcher.start()
 
-    app = create_app(inbox_dir, store)
+    app = create_app(inbox_dir, store, watcher)
     try:
         app.run(host=host, port=port, debug=False, use_reloader=False)
     finally:

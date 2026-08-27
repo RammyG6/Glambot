@@ -6,18 +6,15 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
 from .config import (
-    EDITED_FOOTAGES_SUBDIR,
-    OUTPUT_SUBDIR,
-    QR_APPROVED_SUBDIR,
-    QR_DOWNLOAD_SUBDIR,
-    QR_OUTPUT_SUBDIR,
-    SENT_SUBDIR,
+    FOOTAGE_SUBDIR,
+    THUMBNAIL_SUBDIR,
     ProjectConfig,
 )
 from .db import Job, JobStore
@@ -25,6 +22,13 @@ from .drive import DriveError, upload_and_share
 from .emailer import EmailError
 
 logger = logging.getLogger(__name__)
+
+# Suppresses the console window Windows otherwise pops up for every
+# ffmpeg/ffprobe subprocess a windowed (no-console) process spawns - e.g.
+# the packaged standalone app (windows_app/). `creationflags` is a valid
+# Popen kwarg on every platform; CREATE_NO_WINDOW only exists as a
+# subprocess attribute on Windows, so this is a no-op (0) elsewhere.
+_NO_WINDOW_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 @dataclass
@@ -39,12 +43,10 @@ class OverlaySpec:
 
 
 def resolve_output_base(project_dir: Path, config: ProjectConfig) -> Path:
-    """Base directory that holds the mode subfolder (Output /
-    Output_ReadytoSend) and every sibling archive folder (Selected Output,
-    Instant Download, Email Sent File). Defaults to project_dir (today's
-    behavior). When config.output_dir is set, relocates to
-    <output_dir>/<project_dir.name>_Output, so the whole output lifecycle for
-    that project lives under one relocated parent."""
+    """Base directory that holds the Footage/ and Thumbnail/ subfolders.
+    Defaults to project_dir (today's behavior). When config.output_dir is
+    set, relocates to <output_dir>/<project_dir.name>_Output, so the whole
+    output lifecycle for that project lives under one relocated parent."""
     if config.output_dir:
         return (config.output_dir / f"{project_dir.name}_Output").resolve()
     return project_dir
@@ -59,7 +61,11 @@ def _second_overlay_spec(config: ProjectConfig) -> OverlaySpec:
     return OverlaySpec(config.second_overlay, config.second_overlay_position,
                        config.second_overlay_scale, config.second_overlay_x, config.second_overlay_y)
 
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
+# .mxf (Sony), .cine (Phantom high-speed), .braw (Blackmagic RAW) are accepted
+# here, but stock ffmpeg can only demux .mxf out of the box - .cine/.braw
+# decoding requires a specially-built ffmpeg/SDK plugin the user must supply;
+# without one, those jobs fail cleanly into `error` status via process_job().
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".mxf", ".cine", ".braw"}
 
 _OVERLAY_MARGIN = 20
 THUMBNAIL_SUFFIX = ".jpg"
@@ -108,12 +114,74 @@ def content_hash(path: Path) -> str | None:
 
 # ffprobe (used for the progress bar's total duration and audio-stream
 # detection) is NOT bundled by imageio-ffmpeg — resolve a system one if
-# present, else fall back to the bare name (the callers degrade gracefully
-# when it's absent).
-_FFPROBE = shutil.which("ffprobe") or "ffprobe"
+# present, else (for a packaged .exe) a copy vendored alongside the frozen
+# build, else fall back to the bare name (the callers degrade gracefully
+# when none of those are available).
+def _resolve_ffprobe() -> str:
+    found = shutil.which("ffprobe")
+    if found:
+        return found
+    if getattr(sys, "frozen", False):
+        vendored = Path(sys.executable).resolve().parent / "vendor" / "ffprobe.exe"
+        if vendored.exists():
+            return str(vendored)
+    return "ffprobe"
+
+
+_FFPROBE = _resolve_ffprobe()
 
 _ffmpeg_path: str | None = None
 _ffmpeg_resolved = False
+
+# Lets a Flask request thread reach and kill a render running on the
+# watcher's worker thread (or a rerender/bulk-retry background thread) -
+# there's otherwise no handle any other part of the app has on that specific
+# ffmpeg subprocess.
+_active_lock = threading.Lock()
+_active_processes: dict[int, subprocess.Popen] = {}
+_cancelled_jobs: set[int] = set()
+
+
+def cancel_job(job_id: int) -> bool:
+    """Ask a currently-running render to stop. Returns True if a live
+    process was found and signalled (process_job will mark the job stopped
+    once ffmpeg actually exits), False if nothing is running for this job id
+    right now (already finished, or hasn't started its ffmpeg pass yet)."""
+    with _active_lock:
+        proc = _active_processes.get(job_id)
+        if proc is None:
+            return False
+        _cancelled_jobs.add(job_id)
+    proc.terminate()
+    return True
+
+
+def stop_all_active() -> None:
+    """Terminate every ffmpeg render currently in flight. For a clean process
+    exit (e.g. the packaged Windows app's tray Quit / window-close) - Windows
+    doesn't kill child processes when a parent exits, so skipping this would
+    leave an orphaned ffmpeg.exe still encoding in the background."""
+    with _active_lock:
+        procs = list(_active_processes.values())
+    for proc in procs:
+        proc.terminate()
+
+
+def _pop_cancelled(job_id: int) -> bool:
+    with _active_lock:
+        if job_id in _cancelled_jobs:
+            _cancelled_jobs.discard(job_id)
+            return True
+        return False
+
+
+def _cleanup_partial(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _resolve_ffmpeg() -> str | None:
@@ -144,7 +212,7 @@ def _has_audio_stream(path: Path) -> bool:
         result = subprocess.run(
             [_FFPROBE, "-v", "error", "-select_streams", "a",
              "-show_entries", "stream=index", "-of", "csv=p=0", str(path)],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW_FLAGS,
         )
         if result.returncode != 0:
             return True
@@ -266,7 +334,19 @@ def build_ffmpeg_cmd(input_path: Path, output_path: Path, config: ProjectConfig,
 
     cmd += ["-filter_complex", filter_complex, "-map", "[v]"]
     cmd += ["-map", "[a]"] if audio_mapped else ["-map", "0:a?"]
-    cmd += ["-c:v", "libx264", "-b:v", bitrate, "-preset", "medium"]
+
+    # Network/streaming-preferred output: yuv420p + a broadly-decodable
+    # profile/level plus a regular closed GOP reduce the re-encoding work
+    # Google Drive's backend has to do before a clip is smoothly previewable.
+    # Level 5.1 (rather than the more commonly cited 4.1) is needed because
+    # this app's presets go up to 3840x2160 at 60fps, which 4.1 doesn't cover.
+    effective_fps = config.fps or _probe_fps(input_path) or 30
+    gop = max(1, round(2 * effective_fps))
+    cmd += [
+        "-c:v", "libx264", "-profile:v", "high", "-level", "5.1", "-pix_fmt", "yuv420p",
+        "-b:v", bitrate, "-preset", "medium",
+        "-g", str(gop), "-keyint_min", str(gop), "-sc_threshold", "0",
+    ]
     if config.fps is not None:
         cmd += ["-r", str(config.fps)]
     cmd += [
@@ -283,9 +363,29 @@ def _probe_duration(path: Path) -> float | None:
         result = subprocess.run(
             [_FFPROBE, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW_FLAGS,
         )
         return float(result.stdout.strip())
+    except (FileNotFoundError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _probe_fps(path: Path) -> float | None:
+    """Best-effort source framerate probe, used to size the GOP/keyframe
+    interval when a project doesn't force an explicit fps. Approximate for
+    variable-frame-rate sources - that only shifts the keyframe interval
+    slightly, it doesn't break the closed-GOP guarantee sc_threshold=0
+    provides."""
+    try:
+        result = subprocess.run(
+            [_FFPROBE, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW_FLAGS,
+        )
+        num, _, den = result.stdout.strip().partition("/")
+        den = den or "1"
+        return float(num) / float(den) if float(den) else None
     except (FileNotFoundError, ValueError, subprocess.SubprocessError):
         return None
 
@@ -325,64 +425,83 @@ def _effective_duration(source_path: Path, trim_start: str | None, trim_end: str
     return source_dur
 
 
-def _run_ffmpeg_with_progress(cmd: list[str], total_seconds: float | None, on_progress):
+def _run_ffmpeg_with_progress(cmd: list[str], total_seconds: float | None, on_progress,
+                               job_id: int | None = None):
     """Run an ffmpeg render via Popen, streaming its live -progress output and
     calling on_progress(percent 0-100) as it advances. Returns
     (returncode, stderr_tail). on_progress is only called when the integer
-    percent changes, so it stays cheap even for long clips."""
+    percent changes, so it stays cheap even for long clips.
+
+    When job_id is given, the running process is registered so cancel_job()
+    can reach and terminate it from another thread (e.g. a Flask request)."""
     # -progress writes machine-readable key=value lines to stdout; -nostats
     # silences the usual human progress spam on stderr.
     full_cmd = cmd[:1] + ["-progress", "pipe:1", "-nostats"] + cmd[1:]
-    proc = subprocess.Popen(full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(
+        full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        creationflags=_NO_WINDOW_FLAGS,
+    )
     assert proc.stdout is not None and proc.stderr is not None
 
-    # ffmpeg writes stream/filter info and warnings to stderr throughout the
-    # run. If we only read stdout (the -progress stream) and leave stderr
-    # unread, ffmpeg blocks once stderr fills the OS pipe buffer — a deadlock
-    # that "sticks" processing forever (small Windows pipe buffers hit this
-    # readily). Drain stderr on a background thread so it can never fill up.
-    stderr_chunks: list[str] = []
+    if job_id is not None:
+        with _active_lock:
+            _active_processes[job_id] = proc
 
-    def _drain_stderr():
-        for chunk in proc.stderr:
-            stderr_chunks.append(chunk)
+    try:
+        # ffmpeg writes stream/filter info and warnings to stderr throughout
+        # the run. If we only read stdout (the -progress stream) and leave
+        # stderr unread, ffmpeg blocks once stderr fills the OS pipe buffer —
+        # a deadlock that "sticks" processing forever (small Windows pipe
+        # buffers hit this readily). Drain stderr on a background thread so
+        # it can never fill up.
+        stderr_chunks: list[str] = []
 
-    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
-    stderr_thread.start()
+        def _drain_stderr():
+            for chunk in proc.stderr:
+                stderr_chunks.append(chunk)
 
-    last_pct = -1
-    for line in proc.stdout:
-        line = line.strip()
-        micros = None
-        if line.startswith("out_time_us="):
-            raw = line.split("=", 1)[1]
-            micros = float(raw) if raw not in ("N/A", "") else None
-        elif line.startswith("out_time_ms="):
-            # some ffmpeg builds mislabel this field but it's microseconds too
-            raw = line.split("=", 1)[1]
-            micros = float(raw) if raw not in ("N/A", "") else None
-        if micros is not None and total_seconds:
-            pct = int(min(100, max(0, micros / 1_000_000 / total_seconds * 100)))
-            if pct != last_pct:
-                last_pct = pct
-                on_progress(pct)
-    proc.wait()
-    stderr_thread.join(timeout=5)
-    tail = "\n".join("".join(stderr_chunks).strip().splitlines()[-20:])
-    return proc.returncode, tail
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+
+        last_pct = -1
+        for line in proc.stdout:
+            line = line.strip()
+            micros = None
+            if line.startswith("out_time_us="):
+                raw = line.split("=", 1)[1]
+                micros = float(raw) if raw not in ("N/A", "") else None
+            elif line.startswith("out_time_ms="):
+                # some ffmpeg builds mislabel this field but it's microseconds too
+                raw = line.split("=", 1)[1]
+                micros = float(raw) if raw not in ("N/A", "") else None
+            if micros is not None and total_seconds:
+                pct = int(min(100, max(0, micros / 1_000_000 / total_seconds * 100)))
+                if pct != last_pct:
+                    last_pct = pct
+                    on_progress(pct)
+        proc.wait()
+        stderr_thread.join(timeout=5)
+        tail = "\n".join("".join(stderr_chunks).strip().splitlines()[-20:])
+        return proc.returncode, tail
+    finally:
+        if job_id is not None:
+            with _active_lock:
+                _active_processes.pop(job_id, None)
 
 
 def _make_thumbnail(output_path: Path, thumbnail_path: Path, ffmpeg_bin: str) -> bool:
-    """Grab a representative frame from the finished clip's midpoint, for the
-    kiosk QR screen. Best-effort: a failure here must not fail the job."""
+    """Grab a representative frame at 75% of the finished clip's duration,
+    for the kiosk QR screen. Runs on the already-rendered, already-trimmed
+    output, so this is 75% of the final post-trim duration. Best-effort: a
+    failure here must not fail the job."""
     duration = _probe_duration(output_path) or 2.0
-    midpoint = max(0.1, duration / 2)
+    offset = max(0.1, duration * 0.75)
     cmd = [
-        ffmpeg_bin, "-y", "-ss", f"{midpoint:.2f}", "-i", str(output_path),
+        ffmpeg_bin, "-y", "-ss", f"{offset:.2f}", "-i", str(output_path),
         "-frames:v", "1", "-q:v", "3", str(thumbnail_path),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, creationflags=_NO_WINDOW_FLAGS)
     except FileNotFoundError:
         return False
     return result.returncode == 0 and thumbnail_path.exists()
@@ -434,13 +553,13 @@ def verify_output(output_path: Path, expected_duration: float | None) -> tuple[b
 
 
 def _archive_original(source_path: Path) -> None:
-    """Move a processed original out of its import folder into an
-    "Edited Footages" subfolder (excluded from watching). Best-effort — a
-    failed move must never fail the job."""
+    """Move a processed original out of its import folder into the
+    "Footage" subfolder (excluded from watching), alongside the rendered
+    output. Best-effort — a failed move must never fail the job."""
     try:
         if not source_path.exists():
             return
-        archive_dir = source_path.parent / EDITED_FOOTAGES_SUBDIR
+        archive_dir = source_path.parent / FOOTAGE_SUBDIR
         archive_dir.mkdir(parents=True, exist_ok=True)
         dest = archive_dir / source_path.name
         if dest.exists():
@@ -467,17 +586,18 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
     source_path = Path(job.source_path)
     project_dir = (config.project_dir or source_path.parent).resolve()
     output_base = resolve_output_base(project_dir, config)
-    output_subdir = QR_OUTPUT_SUBDIR if config.delivery_mode == "qr_only" else OUTPUT_SUBDIR
-    output_dir = output_base / output_subdir
+    footage_dir = output_base / FOOTAGE_SUBDIR
+    thumb_dir = output_base / THUMBNAIL_SUBDIR
     try:
-        output_dir.mkdir(parents=True, exist_ok=True)
+        footage_dir.mkdir(parents=True, exist_ok=True)
+        thumb_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         store.mark_error(job.id, f"Output location not accessible: {exc}")
         return
     # Always store an absolute path: it's persisted in the DB and later read
     # back by send_file()/shutil.move() in a process that may have a
     # different working directory than the one that created this job.
-    output_path = (output_dir / (source_path.stem + ".mp4")).resolve()
+    output_path = (footage_dir / (source_path.stem + ".mp4")).resolve()
 
     trim = config.trim_for(job.filename)
     duration = _effective_duration(source_path, trim.start, trim.end)
@@ -496,14 +616,18 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
     logger.info("Processing job %s: %s", job.id, " ".join(cmd))
 
     try:
-        returncode, tail = _run_ffmpeg_with_progress(cmd, duration, _progress_cb(0))
+        returncode, tail = _run_ffmpeg_with_progress(cmd, duration, _progress_cb(0), job_id=job.id)
     except FileNotFoundError:
         store.mark_error(job.id, _FFMPEG_MISSING_MESSAGE)
         return
 
     if returncode != 0:
-        logger.error("ffmpeg failed for job %s: %s", job.id, tail)
-        store.mark_error(job.id, f"ffmpeg failed: {tail}")
+        if _pop_cancelled(job.id):
+            _cleanup_partial(output_path)
+            store.mark_error(job.id, "Stopped by operator.")
+        else:
+            logger.error("ffmpeg failed for job %s: %s", job.id, tail)
+            store.mark_error(job.id, f"ffmpeg failed: {tail}")
         return
 
     ok, reason = verify_output(output_path, duration)
@@ -518,7 +642,7 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
     secondary_output_path: Path | None = None
     if config.second_resolution:
         secondary_output_path = (
-            output_dir / f"{source_path.stem}_{config.second_resolution}.mp4"
+            footage_dir / f"{source_path.stem}_{config.second_resolution}.mp4"
         ).resolve()
         second_cmd = build_ffmpeg_cmd(
             source_path, secondary_output_path, config, trim.start, trim.end, ffmpeg_bin=ffmpeg_bin,
@@ -528,10 +652,21 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
         )
         logger.info("Processing job %s (second resolution): %s", job.id, " ".join(second_cmd))
         try:
-            second_returncode, second_tail = _run_ffmpeg_with_progress(second_cmd, duration, _progress_cb(1))
+            second_returncode, second_tail = _run_ffmpeg_with_progress(
+                second_cmd, duration, _progress_cb(1), job_id=job.id
+            )
         except FileNotFoundError:
             second_returncode, second_tail = 1, "ffmpeg not found"
         if second_returncode != 0:
+            if _pop_cancelled(job.id):
+                # Stopping mid-second-pass aborts the whole job, not just
+                # the second resolution - otherwise it would silently finish
+                # with just the primary output, which isn't what "Stop"
+                # means to the operator.
+                _cleanup_partial(output_path)
+                _cleanup_partial(secondary_output_path)
+                store.mark_error(job.id, "Stopped by operator.")
+                return
             logger.error("Second-resolution ffmpeg failed for job %s: %s", job.id, second_tail)
             # Non-fatal: the primary output is still good, just drop the second one.
             secondary_output_path = None
@@ -544,7 +679,7 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
                              job.id, second_reason)
                 secondary_output_path = None
 
-    thumbnail_path = output_path.with_suffix(THUMBNAIL_SUFFIX)
+    thumbnail_path = (thumb_dir / (source_path.stem + THUMBNAIL_SUFFIX)).resolve()
     thumb_ok = _make_thumbnail(output_path, thumbnail_path, ffmpeg_bin)
     if not thumb_ok:
         logger.warning("Thumbnail generation failed for job %s; kiosk view will show no preview image", job.id)
@@ -553,6 +688,7 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
         job.id, str(output_path),
         thumbnail_path=str(thumbnail_path) if thumb_ok else None,
         secondary_output_path=str(secondary_output_path) if secondary_output_path else None,
+        duration_seconds=_probe_duration(output_path),
     )
     logger.info("Job %s ready: %s", job.id, output_path)
 

@@ -5,56 +5,91 @@
 <title>Glambot — Email a delivered clip</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  .clip-card { display: flex; gap: 1.25rem; align-items: flex-start; }
-  .clip-card .thumb { flex: 0 0 160px; }
-  .clip-card .thumb img { width: 160px; border-radius: var(--radius); background: #000; display: block; }
-  .clip-card .form { flex: 1; min-width: 0; }
+  body { max-width: none; padding: 0; margin: 0; }
+  @media (max-width: 900px) {
+    .sidebar { position: static; height: auto; width: 100% !important; }
+    .app-shell { flex-direction: column; }
+    .main { padding: 1.5rem 1.25rem 3rem; }
+  }
 </style>
 </head>
 <body>
-  <a class="back" href="{{ url_for('index') }}">&larr; Back to review queue</a>
-  <h1>Email a delivered clip</h1>
-  <p class="hint">Send any already-delivered clip to a client by email — it uses the clip's existing download link (nothing is re-uploaded or re-processed).</p>
+<div class="app-shell">
+  {% set nav_mode = 'links' %}
+  {% set active_tab = 'clips' %}
+  {% include '_sidebar.html' %}
 
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% for category, message in messages %}
-      <div class="flash {{ category }}">{{ message }}</div>
-    {% endfor %}
-  {% endwith %}
+  <div class="main">
+    <div class="main-head">
+      <h1>Email a delivered clip</h1>
+    </div>
+    <p class="main-sub">Send any already-delivered clip to a client by email — it uses the clip's existing download link (nothing is re-uploaded or re-processed).</p>
 
-  {% if not cards %}
-    <p class="empty">No delivered clips yet.</p>
-  {% endif %}
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
 
-  {% for card in cards %}
-    {% set job = card.job %}
-    <div class="card">
-      <div class="clip-card">
-        <div class="thumb">
-          <img src="{{ url_for('thumbnail', job_id=job.id) }}" alt="Clip"
-               onerror="this.style.display='none'">
-        </div>
-        <div class="form">
-          <strong>{{ job.project }}</strong> / {{ job.filename }}
-          <div class="meta">Delivered {{ job.sent_at }}</div>
-          <form method="post" action="{{ url_for('email_clip', job_id=job.id) }}">
-            <label for="recipient-{{ job.id }}">Recipient email</label>
-            <input type="email" id="recipient-{{ job.id }}" name="recipient_email" value="{{ card.recipient_default }}">
+    {% if not cards %}
+      <p class="empty">No delivered clips yet.</p>
+    {% endif %}
 
-            <label for="subject-{{ job.id }}">Subject</label>
-            <input type="text" id="subject-{{ job.id }}" name="subject" value="{{ card.subject_default }}">
-
-            <label for="body-{{ job.id }}">Message
-              <span class="hint">— {{ '{link}' }} is filled in automatically</span></label>
-            <textarea id="body-{{ job.id }}" name="body">{{ card.body_default }}</textarea>
-
-            <div class="actions">
-              <button type="submit" class="approve">Send email</button>
+    {% for card in cards %}
+      {% set job = card.job %}
+      <div class="card">
+        <div style="display:flex;gap:1.25rem;align-items:flex-start">
+          <div style="flex:0 0 160px">
+            <img src="{{ url_for('thumbnail', job_id=job.id) }}" alt="Clip"
+                 style="width:160px;border-radius:var(--radius);background:#000;display:block"
+                 onerror="this.style.display='none'">
+          </div>
+          <div style="flex:1;min-width:0">
+            <div class="project-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+              {{ job.project }}
             </div>
-          </form>
+            <div class="card-title">{{ job.filename }}</div>
+            <div class="card-meta-line">Delivered {{ job.sent_at }}</div>
+
+            <form method="post" action="{{ url_for('email_clip', job_id=job.id) }}" style="margin-top:.9rem">
+              <div class="field">
+                <label for="recipient-{{ job.id }}">Recipient email</label>
+                <input type="email" id="recipient-{{ job.id }}" name="recipient_email" value="{{ card.recipient_default }}">
+              </div>
+              <div class="field">
+                <label for="subject-{{ job.id }}">Subject</label>
+                <input type="text" id="subject-{{ job.id }}" name="subject" value="{{ card.subject_default }}">
+              </div>
+              <div class="field">
+                <label for="body-{{ job.id }}">Message
+                  <span class="field-hint">— {{ '{link}' }} is filled in automatically</span></label>
+                <textarea id="body-{{ job.id }}" name="body">{{ card.body_default }}</textarea>
+              </div>
+              <button type="submit" class="btn btn-primary">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6l9 6 9-6"/><rect x="3" y="5" width="18" height="14" rx="2"/></svg>
+                Send email
+              </button>
+            </form>
+          </div>
         </div>
       </div>
-    </div>
-  {% endfor %}
+    {% endfor %}
+  </div>
+</div>
+
+<script>
+  (function () {
+    var sidebar = document.getElementById('sidebar');
+    var btn = document.getElementById('sidebarCollapseBtn');
+    function render(collapsed) { sidebar.classList.toggle('collapsed', collapsed); }
+    render(localStorage.getItem('glambot-sidebar-collapsed') === 'yes');
+    btn.addEventListener('click', function () {
+      var collapsed = !sidebar.classList.contains('collapsed');
+      localStorage.setItem('glambot-sidebar-collapsed', collapsed ? 'yes' : 'no');
+      render(collapsed);
+    });
+  })();
+</script>
 </body>
 </html>

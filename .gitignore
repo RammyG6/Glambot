@@ -20,3 +20,11 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Windows standalone app build output — GlambotSetup.exe embeds this
+# machine's live secrets (see windows_app/installer.iss); never commit it.
+windows_app/build/
+windows_app/dist/
+windows_app/vendor/*.exe
+windows_app/*.exe
+windows_app/glambotlogo.ico

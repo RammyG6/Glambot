@@ -15,8 +15,8 @@ inbox/
     config.json                   # bitrate, resolution, aspect ratio, overlay, recipient, trim
     footage1.mp4
     footage2.mov
-    Output_ReadytoSend/           # processed clips, created automatically
-    Email Sent File/              # archive, created automatically after sending
+    Footage/                      # rendered clips + archived originals, created automatically
+    Thumbnail/                    # thumbnails + QR/download photos, created automatically
 overlays/
   brand.png                       # overlay graphics referenced by config.json
 soundtracks/
@@ -30,17 +30,19 @@ soundtracks/
 2. Drop footage into that `inbox/<project>/` folder (Finder drag-and-drop is
    fine — the form doesn't upload video files, only the config).
 3. The watcher notices the new file once it's finished copying, trims/overlays/
-   compresses it with ffmpeg, and writes the result to `Output_ReadytoSend/`.
-   The **original** is then moved into an `Edited Footages/` subfolder inside
-   its own import folder — so the drop folder stays clean and processed files
-   are never picked up again.
+   compresses it with ffmpeg, and writes the result — plus a thumbnail — to
+   `Footage/`/`Thumbnail/` inside its own import folder. The **original** is
+   then moved alongside the rendered clip into that same `Footage/` folder —
+   so the drop folder stays clean and processed files are never picked up
+   again.
 4. Open the review app (`http://127.0.0.1:5000`), preview the clip, choose a
    **delivery method** if you want to override the project default, edit the
    recipient email and the email subject/message if needed, and click **Approve**
    (or **Reject**).
 5. On Approve: the file uploads to your designated Google Drive folder and the
-   file moves to `Email Sent File/`. What happens next depends on the delivery
-   method:
+   job's status updates to `sent` in the database — the file itself stays
+   exactly where it was rendered, in `Footage/`/`Thumbnail/`. What happens
+   next depends on the delivery method:
    - **Email to client** — a shareable link + QR code appear on screen, and the
      recipient gets a **link-only** email.
    - **Instant QR download (kiosk)** — no email is sent. Instead a full-screen
@@ -164,11 +166,12 @@ the fact from **"Email a delivered clip"** on the review page (`/clips`):
 pick a clip, enter a recipient/subject/message, and Send — it emails the
 clip's existing Drive link (with QR), no re-upload or re-processing.
 
-For this exact combination (`qr_only` + `auto_deliver`), the video,
-thumbnail, and the composite QR-code photo all stay together in the
-project's `Output/` folder — there's no manual review step "selecting"
-anything out of it, so nothing moves to `Selected Output/`/`Instant
-Download/` the way a manually-approved `qr_only` clip does.
+Every clip, regardless of delivery mode or auto-deliver setting, always lives
+in the same two folders: the rendered video (and archived original) in
+`Footage/`, the thumbnail and any composite QR-code "download photo" in
+`Thumbnail/`. Nothing ever moves between folders as a clip progresses through
+review/approval — delivery status (ready/sent/rejected) is tracked purely in
+the database.
 
 If an automatic delivery fails (bad credentials, no network, …), the clip
 simply stays in the normal review queue with the error shown inline — exactly
@@ -238,6 +241,13 @@ the end of it), and paste it in. Leave it blank to keep using the default.
 ```bash
 cp .env.example .env   # then fill in the values below
 ```
+
+Recognized footage extensions: `.mp4`, `.mov`, `.m4v`, `.avi`, `.mkv`, `.webm`,
+`.mxf` (Sony), `.cine` (Phantom high-speed), `.braw` (Blackmagic RAW). Stock
+ffmpeg demuxes `.mxf` fine, but typically **cannot** decode `.cine`/`.braw`
+without a specially-built ffmpeg/SDK plugin — without one, those jobs land in
+the review app's **Errors** section with the ffmpeg failure message attached,
+same as any other unsupported codec.
 
 ffmpeg isn't a hard requirement to install separately — if it's not found on `PATH`,
 Glambot automatically falls back to the static ffmpeg binary bundled by the
@@ -350,7 +360,7 @@ cat > inbox/demo/config.json <<'EOF'
 EOF
 ```
 
-Then run `./run.sh` and watch `inbox/demo/Output_ReadytoSend/` appear.
+Then run `./run.sh` and watch `inbox/demo/Footage/` appear.
 
 ## Status / troubleshooting
 
@@ -365,7 +375,11 @@ Then run `./run.sh` and watch `inbox/demo/Output_ReadytoSend/` appear.
   Drive link).
 - The monitoring page (`/projects/<name>/kiosk`) shows **all** of a project's
   delivered clips as a newest-first grid of thumbnail + QR code(s), refreshing
-  itself every few seconds — a "wall of scan-your-clip" for a venue.
+  itself every few seconds — a "wall of scan-your-clip" for a venue. Each
+  tile has a small **hide** button (upper-right corner) to pull an individual
+  clip off the screen without deleting it — hidden clips are reversible from
+  `/projects/<name>/kiosk/hidden` (linked from the kiosk page), which lists
+  them with an **Unhide** button to bring one back.
 - Invalid or missing `config.json` → the clip won't process; the error shows
   up in the review app's **Errors** section once a footage file has landed.
 - Failed Drive upload or email send on Approve → the job **stays in the

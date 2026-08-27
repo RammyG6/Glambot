@@ -1,0 +1,5 @@
+# Extra runtime dependencies for the packaged Windows app only (native
+# window + tray icon) - NOT used by run.sh / Glambot.bat / the Mac app, so
+# these stay out of the main requirements.txt.
+pywebview==5.3.2
+pystray==0.19.5

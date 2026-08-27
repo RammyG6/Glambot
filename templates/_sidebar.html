@@ -1,0 +1,49 @@
+{# Shared operator-dashboard sidebar. Included with two required variables
+   set by the including page:
+     nav_mode   'tabs'  - review.html itself; nav items are buttons that
+                           drive its own client-side tab switcher.
+                'links' - any other page; nav items are real links back to
+                           / with a #tab hash so review.html's tab switcher
+                           lands on the right tab (see its location.hash
+                           handling).
+     active_tab 'clips' | 'projects' | 'output' | 'errors'
+   Badge counts (clips_count, projects_count, output_count, errors_count)
+   are optional - a page that doesn't compute one just shows a hidden (0)
+   badge; review.html itself corrects these client-side after a Clear (see
+   its updateBadge()). #}
+{% macro _nav(tab, icon, label, badge=none, danger=false) %}
+{% if nav_mode == 'tabs' %}
+<button type="button" class="nav-item {{ 'active' if tab == active_tab else '' }}" data-tab="{{ tab }}">
+{% else %}
+<a href="{{ url_for('index') }}#{{ tab }}" class="nav-item {{ 'active' if tab == active_tab else '' }}">
+{% endif %}
+  {{ icon|safe }}
+  <span class="nav-name">{{ label }}</span>
+  <span class="nav-badge {{ 'danger' if danger else '' }}" data-badge="{{ tab }}" {{ '' if badge else 'style="display:none"' }}>{{ badge or 0 }}</span>
+{% if nav_mode == 'tabs' %}</button>{% else %}</a>{% endif %}
+{% endmacro %}
+<div class="sidebar" id="sidebar">
+  <div class="brand">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10l5-3v10l-5-3M4 6h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"/></svg>
+    </div>
+    <div class="brand-name">Glambot</div>
+    <button type="button" class="sidebar-collapse-btn" id="sidebarCollapseBtn" title="Collapse sidebar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
+  </div>
+
+  <div class="nav-group">
+    {{ _nav('clips', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10l5-3v10l-5-3M4 6h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"/></svg>', 'Clips', clips_count) }}
+    {{ _nav('projects', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>', 'Projects', projects_count) }}
+    {{ _nav('output', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5m0 14h16M8 15l3-4 3 3 4-6"/></svg>', 'Output', output_count) }}
+    {{ _nav('errors', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9L2.7 17a1.6 1.6 0 0 0 1.4 2.4h15.8a1.6 1.6 0 0 0 1.4-2.4L13.7 3.9a1.6 1.6 0 0 0-2.8 0z"/></svg>', 'Errors', errors_count, danger=true) }}
+  </div>
+
+  <div class="sidebar-foot">
+    <a href="{{ url_for('new_project_form') }}" class="new-project-btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      <span class="new-project-label">New Project</span>
+    </a>
+  </div>
+</div>

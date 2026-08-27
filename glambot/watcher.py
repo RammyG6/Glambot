@@ -94,6 +94,14 @@ class InboxWatcher:
         self._warned_managed: set[str] = set()
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._stop = threading.Event()
+        # Guards _sync_watches() so the periodic worker-thread call and an
+        # on-demand rescan_now() call (e.g. from a Flask request) never run
+        # concurrently and race on self._watched_paths/_project_watch_dirs.
+        self._sync_lock = threading.Lock()
+        # Guards _seen: mutated both from consider() (called on the
+        # watchdog event thread or the scan thread) and from
+        # _wait_and_enqueue() (its own per-file thread, on failure).
+        self._seen_lock = threading.Lock()
 
     def start(self) -> None:
         self.inbox_dir.mkdir(parents=True, exist_ok=True)
@@ -109,14 +117,20 @@ class InboxWatcher:
         self._observer.join()
         self._worker_thread.join(timeout=5)
 
+    def rescan_now(self) -> None:
+        """Force an immediate full re-sync/scan of every project's watch
+        folder, instead of waiting for the periodic ~watch_sync_interval
+        cycle. Safe to call from any thread (e.g. a Flask request)."""
+        self._sync_watches()
+
     def _drop_managed_watch_dirs(self, candidates: dict[str, Path]) -> dict[str, Path]:
         """Refuse to watch any folder inside one Glambot manages itself.
 
         load_config() rejects these too, so normally nothing reaches here —
         but a config.json written before that validation existed would
         otherwise start an endless loop: `_archive_original` moves each
-        finished original into "Edited Footages", and a project watching that
-        folder sees every one of them as brand-new footage."""
+        finished original into "Footage", and a project watching that folder
+        sees every one of them as brand-new footage."""
         kept: dict[str, Path] = {}
         for project, folder in candidates.items():
             managed = managed_subdir_in(folder)
@@ -149,6 +163,10 @@ class InboxWatcher:
         per-folder scan at the end is the reliable detection mechanism —
         idempotent (consider() dedups via `_seen`/`find_by_source`) and cheap,
         so it also self-heals any live FS event that was missed."""
+        with self._sync_lock:
+            self._sync_watches_locked()
+
+    def _sync_watches_locked(self) -> None:
         candidates = project_watch_dirs(self.inbox_dir)
         candidates = self._drop_managed_watch_dirs(candidates)
         groups = group_by_folder(candidates)
@@ -243,8 +261,9 @@ class InboxWatcher:
             return
         resolved = str(path.resolve())
         key = (resolved, project)
-        if key in self._seen:
-            return
+        with self._seen_lock:
+            if key in self._seen:
+                return
         existing = self.store.find_by_source(resolved)
         if existing is not None and (self.inbox_dir / existing.project / "config.json").exists():
             # This file already has a job under a project that STILL EXISTS —
@@ -253,39 +272,60 @@ class InboxWatcher:
             # churning every already-processed clip: only files with no job,
             # or an orphaned job left by a since-DELETED project, fall through
             # to be processed under the now-active project.
-            self._seen.add(key)
+            with self._seen_lock:
+                self._seen.add(key)
             return
-        self._seen.add(key)
+        with self._seen_lock:
+            self._seen.add(key)
         threading.Thread(target=self._wait_and_enqueue, args=(path,), daemon=True).start()
 
     def _wait_and_enqueue(self, path: Path) -> None:
         """Poll the file's size until it stops changing for `settle_seconds`
         AND it's no longer held open by another process, so we don't start
         processing a file that's still being copied — or one whose FTP
-        transfer has merely stalled long enough to look size-stable."""
-        last_size = -1
-        stable_since: float | None = None
-        while not self._stop.is_set():
-            try:
-                size = path.stat().st_size
-            except FileNotFoundError:
-                return
-            if size == last_size:
-                if stable_since is None:
-                    stable_since = time.monotonic()
-                elif time.monotonic() - stable_since >= self.settle_seconds:
-                    if not _is_locked(path):
-                        break
-                    # Still open by its writer: restart the settle timer and
-                    # keep waiting rather than grabbing a partial file.
+        transfer has merely stalled long enough to look size-stable.
+
+        If this gives up without enqueueing - the file vanished mid-settle
+        (e.g. an ingest tool's atomic write/rename briefly removed it), or
+        anything else goes wrong - the path is forgotten from `_seen` so a
+        later scan can retry it. Without this, a single transient failure
+        here silently and permanently blocks that file for the life of the
+        process: consider() sees the key already in `_seen` and never tries
+        again."""
+        enqueued = False
+        try:
+            last_size = -1
+            stable_since: float | None = None
+            while not self._stop.is_set():
+                try:
+                    size = path.stat().st_size
+                except FileNotFoundError:
+                    return
+                if size == last_size:
+                    if stable_since is None:
+                        stable_since = time.monotonic()
+                    elif time.monotonic() - stable_since >= self.settle_seconds:
+                        if not _is_locked(path):
+                            break
+                        # Still open by its writer: restart the settle timer
+                        # and keep waiting rather than grabbing a partial file.
+                        stable_since = None
+                else:
                     stable_since = None
+                    last_size = size
+                time.sleep(self.poll_interval)
             else:
-                stable_since = None
-                last_size = size
-            time.sleep(self.poll_interval)
-        else:
-            return
-        self._queue.put(path)
+                return
+            self._queue.put(path)
+            enqueued = True
+        except Exception:
+            logger.exception("Settle-wait failed for %s - will retry on next scan", path)
+        finally:
+            if not enqueued:
+                project = self._project_for_path(path)
+                if project is not None:
+                    with self._seen_lock:
+                        self._seen.discard((str(path.resolve()), project))
 
     def _worker_loop(self) -> None:
         last_sync = time.monotonic()

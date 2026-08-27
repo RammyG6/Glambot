@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,13 +17,7 @@ from .config import ProjectConfig
 from .db import Job, JobStore
 from .drive import upload_and_share
 from .emailer import send_delivery_email
-from .processor import (
-    QR_APPROVED_SUBDIR,
-    QR_DOWNLOAD_SUBDIR,
-    SENT_SUBDIR,
-    resolve_output_base,
-    verify_output,
-)
+from .processor import verify_output
 from .qr import make_delivery_photo, make_qr_data_uri
 
 logger = logging.getLogger(__name__)
@@ -43,37 +36,6 @@ class DeliveryResult:
     link2: str | None
     qr_data_uri: str
     qr_data_uri2: str | None
-
-
-def _archive(job: Job, output_base: Path, subdir: str) -> tuple[Path, Path | None, Path | None]:
-    """Move the primary output (+ thumbnail + secondary output, if present)
-    into the project's archive subfolder (a sibling of the relocated Output
-    folder when a custom output_dir is configured). Returns (primary,
-    thumbnail, secondary) destination paths."""
-    archive_dir = output_base / subdir
-    archive_dir.mkdir(parents=True, exist_ok=True)
-
-    src = Path(job.output_path)
-    dest = archive_dir / src.name
-    shutil.move(str(src), str(dest))
-
-    archived_thumb: Path | None = None
-    if job.thumbnail_path:
-        thumb_src = Path(job.thumbnail_path)
-        if thumb_src.exists():
-            thumb_dest = archive_dir / thumb_src.name
-            shutil.move(str(thumb_src), str(thumb_dest))
-            archived_thumb = thumb_dest
-
-    archived_secondary: Path | None = None
-    if job.secondary_output_path:
-        sec_src = Path(job.secondary_output_path)
-        if sec_src.exists():
-            sec_dest = archive_dir / sec_src.name
-            shutil.move(str(sec_src), str(sec_dest))
-            archived_secondary = sec_dest
-
-    return dest, archived_thumb, archived_secondary
 
 
 def deliver(job: Job, config: ProjectConfig, store: JobStore, inbox_dir: Path, *,
@@ -112,23 +74,13 @@ def deliver(job: Job, config: ProjectConfig, store: JobStore, inbox_dir: Path, *
             final_body = f"{body}\n\nAlternate version: {link2}"
         send_delivery_email(recipient=recipient, subject=subject, body=final_body, link=link, link2=link2)
 
-    # Full-auto QR-kiosk mode (qr_only + auto_deliver) keeps everything
-    # together in Output/ — there's no manual review step "selecting"
-    # anything out of it, so a separate Selected Output/Instant Download
-    # split only adds an extra place to look. Manual qr_only Approve, and
-    # email mode, keep the existing archive-on-deliver behavior.
-    keep_in_output = delivery_mode == "qr_only" and config.auto_deliver
-    if keep_in_output:
-        archived_path = Path(job.output_path)
-        archived_thumb = Path(job.thumbnail_path) if job.thumbnail_path else None
-        archived_secondary = Path(job.secondary_output_path) if job.secondary_output_path else None
-        download_dir = archived_path.parent
-    else:
-        project_dir = (config.project_dir or (inbox_dir / job.project)).resolve()
-        output_base = resolve_output_base(project_dir, config)
-        archive_subdir = QR_APPROVED_SUBDIR if delivery_mode == "qr_only" else SENT_SUBDIR
-        archived_path, archived_thumb, archived_secondary = _archive(job, output_base, archive_subdir)
-        download_dir = output_base / QR_DOWNLOAD_SUBDIR
+    # Lifecycle status lives only in the DB now (see mark_sent below) - no
+    # file ever moves on approve. `Thumbnail/` already holds the thumbnail,
+    # so the QR+thumbnail "download photo" belongs right alongside it there.
+    archived_path = Path(job.output_path)
+    archived_thumb = Path(job.thumbnail_path) if job.thumbnail_path else None
+    archived_secondary = Path(job.secondary_output_path) if job.secondary_output_path else None
+    download_dir = archived_thumb.parent if archived_thumb else None
 
     if delivery_mode == "qr_only" and archived_thumb:
         try:
@@ -148,10 +100,9 @@ def deliver(job: Job, config: ProjectConfig, store: JobStore, inbox_dir: Path, *
         recipient_email=recipient or None,
         delivery_mode=delivery_mode,
         thumbnail_path=str(archived_thumb) if archived_thumb else job.thumbnail_path,
+        secondary_output_path=str(archived_secondary) if archived_secondary else job.secondary_output_path,
         secondary_drive_link=link2,
     )
-    if archived_secondary:
-        updated_job = store.update_job(job.id, secondary_output_path=str(archived_secondary))
 
     qr_data_uri = make_qr_data_uri(link)
     qr_data_uri2 = make_qr_data_uri(link2) if link2 else None

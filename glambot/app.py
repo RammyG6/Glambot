@@ -15,7 +15,9 @@ import math
 import os
 import re
 import shutil
+import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -36,7 +38,9 @@ from .delivery import DeliveryError, deliver
 from .drive import DriveError
 from .emailer import EmailError, load_default_template, resolve_placeholders, send_delivery_email
 from .folders import all_project_dirs, group_by_folder, project_watch_dirs
+from .processor import cancel_job, is_footage_file
 from .qr import make_qr_data_uri
+from .watcher import InboxWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +63,25 @@ _VALID_ROTATIONS = {val for val, _ in ROTATION_CHOICES}
 _PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,63}$")
 
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_SOUNDTRACKS_DIR = _REPO_ROOT / "soundtracks"
+# Code assets (templates/static/logo) live wherever the app was installed -
+# _REPO_ROOT tracks that. A PyInstaller-frozen build extracts to a temp/
+# install dir rather than preserving glambot/app.py's normal package layout,
+# so __file__ isn't reliable there; use the executable's own folder instead.
+_REPO_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
+    else Path(__file__).resolve().parent.parent
+
+# User-editable data (uploaded via the New Project form) - lives next to the
+# inbox/project data, not the code, so it survives an app upgrade/reinstall.
+# Resolved against the CWD rather than a parameter here because CWD is set to
+# the data folder once at process startup (see glambot/pipeline.py) - every
+# other data-relative path in this codebase (`.env`, credentials.json,
+# config.json's relative overlay/soundtrack paths) already relies on that
+# same convention.
+_SOUNDTRACKS_DIR = Path.cwd() / "soundtracks"
+_BACKGROUNDS_DIR = Path.cwd() / "backgrounds"
 
 
-def create_app(inbox_dir: Path, store: JobStore) -> Flask:
+def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask:
     app = Flask(
         __name__,
         template_folder=str(_REPO_ROOT / "templates"),
@@ -72,6 +90,15 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
     app.secret_key = os.environ.get("FLASK_SECRET", "glambot-local-dev")
     app.config["INBOX_DIR"] = Path(inbox_dir)
     app.config["STORE"] = store
+
+    @app.template_filter("mmss")
+    def _mmss(seconds):
+        """Format a seconds value (float/int, possibly None) as M:SS for
+        the review page's render-time/clip-length display."""
+        if seconds is None:
+            return "—"
+        total = int(round(seconds))
+        return f"{total // 60}:{total % 60:02d}"
 
     @app.get("/")
     def index():
@@ -85,6 +112,7 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
             for j in store.list_jobs(status="error")
         ]
         sent_jobs = store.list_jobs(status="sent")[:20]
+        sent_cards = [{"job": j, "render_seconds": _render_seconds(j)} for j in sent_jobs]
         processing_jobs = store.list_jobs(status="processing")
 
         # Full-automation kiosk clips (qr_only + auto_deliver) don't get an
@@ -112,8 +140,10 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         email_log = [j for j in store.list_jobs(status="sent") if j.delivery_mode == "email"][:60]
         return render_template(
             "review.html", cards=cards, error_jobs=error_jobs, sent_jobs=sent_jobs,
+            sent_cards=sent_cards,
             project_groups=project_groups, processing_jobs=processing_jobs,
             output_log=output_log, email_log=email_log, auto_failed=auto_failed,
+            project_orientations=_project_orientations(inbox_dir),
         )
 
     @app.get("/status")
@@ -128,6 +158,22 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         ])
         resp.headers["Cache-Control"] = "no-store"
         return resp
+
+    @app.post("/jobs/<int:job_id>/stop")
+    def stop_job(job_id):
+        """Kill a render that's running too long (e.g. an accidental
+        over-length recording). The source file is untouched - process_job
+        only archives the original after a successful render - so the
+        existing Re-render button (and bulk retry) can reprocess it."""
+        job = store.get_job(job_id)
+        if job is None or job.status != "processing":
+            flash("That clip isn't currently processing.", "error")
+            return redirect(url_for("index"))
+        if cancel_job(job_id):
+            flash(f"Stopping {job.filename}...", "info")
+        else:
+            flash("Nothing is actively rendering for that clip yet - try again in a moment.", "error")
+        return redirect(url_for("index"))
 
     @app.post("/folders/active")
     def set_active_folder_project():
@@ -163,7 +209,8 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         operator can leave it open on a venue monitor as a wall of
         scan-your-clip codes that stays current on its own as new clips
         auto-deliver (see `auto_deliver` in config.json)."""
-        jobs = [j for j in store.list_jobs(project=project, status="sent") if j.drive_link][:12]
+        jobs = [j for j in store.list_jobs(project=project, status="sent")
+                if j.drive_link and not j.hidden_from_kiosk][:8]
         items = []
         for job in jobs:
             items.append({
@@ -178,7 +225,8 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
     def kiosk_live_json(project):
         """Live JSON for the monitoring page — polled so the video panel and
         grid stay current without a full page reload restarting playback."""
-        jobs = [j for j in store.list_jobs(project=project, status="sent") if j.drive_link][:12]
+        jobs = [j for j in store.list_jobs(project=project, status="sent")
+                if j.drive_link and not j.hidden_from_kiosk][:8]
         resp = jsonify({
             "latest_id": jobs[0].id if jobs else None,
             "clips": [
@@ -191,25 +239,169 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
+    @app.get("/projects/<project>/kiosk/hidden")
+    def kiosk_hidden(project):
+        """Clips an operator hid from the kiosk screen - viewable and
+        reversible here, never deleted."""
+        jobs = [j for j in store.list_jobs(project=project, status="sent")
+                if j.drive_link and j.hidden_from_kiosk]
+        items = [{"job": j, "qr_data_uri": make_qr_data_uri(j.drive_link)} for j in jobs]
+        return render_template("kiosk_hidden.html", project=project, items=items)
+
+    @app.get("/projects/<project>/playback-background")
+    def playback_background(project):
+        """Serves the effective background image for the reel - the
+        project's uploaded one, or the default Glambot logo if none is set."""
+        project_dir = _resolve_project(project)
+        path = None
+        try:
+            config = load_config(project_dir)
+            if config.playback_background:
+                path = Path(config.playback_background)
+        except ConfigError:
+            path = None
+        if path is None:
+            path = _REPO_ROOT / "logo" / "glambotlogo.png"
+        if not path.exists():
+            abort(404)
+        return send_file(path)
+
+    @app.get("/projects/<project>/playback")
+    def playback_reel(project):
+        """Dedicated full-screen page that just plays every delivered clip
+        for a project on a loop, newest first - a second venue display
+        distinct from the QR-code Kiosk monitor."""
+        project_dir = _resolve_project(project)
+        try:
+            opacity = load_config(project_dir).playback_background_opacity
+        except ConfigError:
+            opacity = 50
+        return render_template("playback.html", project=project, background_opacity=opacity)
+
+    @app.get("/projects/<project>/playback.json")
+    def playback_reel_json(project):
+        """Every delivered, non-hidden clip for the project, newest-first,
+        with no cap (unlike kiosk.json's [:8]) - the reel loops through the
+        full history, not just the newest handful."""
+        jobs = [j for j in store.list_jobs(project=project, status="sent")
+                if j.drive_link and not j.hidden_from_kiosk]
+        resp = jsonify({"clips": [{"id": j.id, "filename": j.filename} for j in jobs]})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.post("/jobs/<int:job_id>/hide")
+    def hide_job(job_id):
+        job = store.get_job(job_id)
+        if job is None:
+            abort(404)
+        store.set_hidden(job_id, True)
+        return jsonify({"ok": True})
+
+    @app.post("/jobs/<int:job_id>/unhide")
+    def unhide_job(job_id):
+        job = store.get_job(job_id)
+        if job is None:
+            abort(404)
+        store.set_hidden(job_id, False)
+        return jsonify({"ok": True})
+
     @app.get("/browse")
     def browse():
-        """Read-only directory listing (names only, no file contents) for
-        the New Project form's in-app folder browser. Consistent with this
-        app's existing no-auth/local-machine-only design."""
-        raw = request.args.get("path", "")
+        """Read-only directory listing for the New Project form's in-app
+        folder browser (subfolders) and the Import footage page (subfolders
+        + matching footage files, via ?files=1). Consistent with this app's
+        existing no-auth/local-machine-only design."""
+        # Strip surrounding quotes/whitespace: Windows Explorer's "Copy as
+        # path" wraps the result in double quotes, which would otherwise
+        # silently fail to resolve and fall back to the home folder below -
+        # with no error shown, so a pasted path just quietly shows the wrong
+        # folder's contents.
+        raw = request.args.get("path", "").strip().strip('"').strip("'")
         base = Path(raw).expanduser() if raw else Path.home()
+        # Surfaced in the response so the browser can warn the user instead
+        # of silently showing an unrelated folder's contents - a typo'd or
+        # since-deleted path would otherwise look like "this folder is
+        # empty" with no indication it wasn't even the folder asked for.
+        not_found = bool(raw) and not base.is_dir()
         if not base.is_dir():
             base = Path.home()
         base = base.resolve()
         try:
-            folders = sorted(
-                (p.name for p in base.iterdir() if p.is_dir() and not p.name.startswith(".")),
-                key=str.lower,
-            )
+            entries = sorted(base.iterdir(), key=lambda p: p.name.lower())
         except PermissionError:
-            folders = []
+            entries = []
+        folders = [p.name for p in entries if p.is_dir() and not p.name.startswith(".")]
         parent = str(base.parent) if base.parent != base else None
-        return jsonify({"path": str(base), "parent": parent, "folders": folders})
+        resp = {"path": str(base), "parent": parent, "folders": folders, "not_found": not_found}
+        if request.args.get("files"):
+            resp["files"] = [
+                {"name": p.name, "size": p.stat().st_size}
+                for p in entries if p.is_file() and is_footage_file(p)
+            ]
+        return jsonify(resp)
+
+    @app.post("/rescan")
+    def rescan():
+        """Force an immediate re-scan of every project's watch folder,
+        instead of waiting for the watcher's periodic ~10s cycle - e.g. right
+        after starting the camera before the Glambot PC was ready."""
+        watcher.rescan_now()
+        flash("Rescanned every project's watch folder.", "info")
+        return redirect(url_for("index"))
+
+    @app.get("/projects/<project>/import")
+    def import_footage_form(project):
+        _resolve_project(project)
+        return render_template("import_footage.html", project=project)
+
+    @app.post("/projects/<project>/import")
+    def import_footage(project):
+        project_dir = _resolve_project(project)
+        try:
+            config = load_config(project_dir)
+        except ConfigError as exc:
+            flash(f"Config problem: {exc}", "error")
+            return redirect(url_for("import_footage_form", project=project))
+
+        # Shared-folder safety: refuse if this project isn't the active
+        # owner of its watch folder, so imported footage is never silently
+        # attributed to a different project.
+        inbox_dir = app.config["INBOX_DIR"]
+        watch_dirs = project_watch_dirs(inbox_dir)
+        dest_dir = watch_dirs.get(project, config.source_dir or project_dir)
+        groups = group_by_folder(watch_dirs)
+        sharing = [p for p in groups.get(dest_dir, []) if p != project]
+        if sharing:
+            active = store.get_active_project(str(dest_dir))
+            if active != project:
+                flash(
+                    f"This project's footage folder is shared with {', '.join(sharing)} "
+                    f"and '{active}' is currently active for it - imported files would be "
+                    f"attributed there instead. Switch the active project first.", "error",
+                )
+                return redirect(url_for("import_footage_form", project=project))
+
+        folder_path = request.form.get("folder", "").strip()
+        folder = Path(folder_path) if folder_path else None
+        if not folder or not folder.is_dir():
+            flash("That folder no longer exists.", "error")
+            return redirect(url_for("import_footage_form", project=project))
+
+        # Never trust submitted filenames directly - recompute the real
+        # footage listing for this exact folder fresh, same anti-tampering
+        # pattern as delete_all_projects.
+        available = {p.name for p in folder.iterdir() if p.is_file() and is_footage_file(p)}
+        chosen = [name for name in request.form.getlist("files") if name in available]
+        if not chosen:
+            flash("Nothing was selected - nothing was imported.", "info")
+            return redirect(url_for("import_footage_form", project=project))
+
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        threading.Thread(
+            target=_import_worker, args=(folder, chosen, dest_dir, watcher), daemon=True,
+        ).start()
+        flash(f"Importing {len(chosen)} file(s) into {project}...", "info")
+        return redirect(url_for("index"))
 
     @app.post("/jobs/<int:job_id>/approve")
     def approve(job_id):
@@ -299,6 +491,33 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         flash(f"Re-rendering {job.filename}...", "info")
         return redirect(url_for("index"))
 
+    @app.post("/retry_all_failed_renders")
+    def retry_all_failed_renders():
+        """Bulk version of /rerender - retries every job across every
+        project that's in 'error' status with its source file still on disk
+        (the same eligibility the single-clip Re-render button already uses,
+        app.py's index() error_jobs/can_rerender), so this never does
+        anything the operator couldn't already trigger one-by-one."""
+        inbox_dir = app.config["INBOX_DIR"]
+        targets = []
+        for job in store.list_jobs(status="error"):
+            if not (job.source_path and Path(job.source_path).exists()):
+                continue
+            try:
+                config = load_config(inbox_dir / job.project)
+            except ConfigError as exc:
+                store.update_job(job.id, error=f"Config problem: {exc}")
+                continue
+            targets.append((job, config))
+        if not targets:
+            flash("No failed renders to retry (or their source files are missing).", "info")
+            return redirect(url_for("index"))
+        for job, _ in targets:
+            store.update_job(job.id, status="processing", error=None, progress=0)
+        threading.Thread(target=_rerender_all_worker, args=(targets, store), daemon=True).start()
+        flash(f"Re-rendering {len(targets)} clip(s)...", "info")
+        return redirect(url_for("index"))
+
     @app.post("/jobs/<int:job_id>/retry_delivery")
     def retry_delivery(job_id):
         """Re-run automatic delivery for a full-auto kiosk clip whose first
@@ -315,26 +534,42 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
             flash(f"Config problem: {exc}", "error")
             return redirect(url_for("index"))
 
-        subject, body = "", ""
         try:
-            raw_subject, raw_body = load_default_template()
-            subject = resolve_placeholders(raw_subject, link="{link}", project=job.project, filename=job.filename)
-            body = resolve_placeholders(raw_body, link="{link}", project=job.project, filename=job.filename)
-        except Exception:
-            pass
-
-        try:
-            deliver(
-                job, config, store, inbox_dir,
-                recipient=config.recipient_email or None,
-                subject=subject, body=body, delivery_mode=config.delivery_mode,
-            )
+            _retry_one_delivery(job, config, store, inbox_dir)
         except (DriveError, EmailError, DeliveryError) as exc:
             logger.exception("Retry delivery failed for job %s", job_id)
             store.update_job(job_id, error=f"Auto-delivery failed: {exc}")
             flash(f"Delivery still failing: {exc}", "error")
             return redirect(url_for("index"))
         flash(f"Delivered {job.filename}.", "info")
+        return redirect(url_for("index"))
+
+    @app.post("/retry_all_failed_deliveries")
+    def retry_all_failed_deliveries():
+        """Bulk version of /jobs/<id>/retry_delivery - retries every job
+        across every project that's a full-auto kiosk clip stuck in 'ready'
+        with a recorded delivery error (the same eligibility index()'s
+        auto_failed list already uses), so a stretch of stuck clips from an
+        internet outage can be cleared in one click instead of one at a
+        time."""
+        inbox_dir = app.config["INBOX_DIR"]
+        targets = []
+        for job in store.list_jobs(status="ready"):
+            if not job.error:
+                continue
+            try:
+                config = load_config(inbox_dir / job.project)
+            except ConfigError:
+                continue
+            if config.delivery_mode == "qr_only" and config.auto_deliver:
+                targets.append((job, config))
+        if not targets:
+            flash("No failed deliveries to retry.", "info")
+            return redirect(url_for("index"))
+        threading.Thread(
+            target=_retry_all_deliveries_worker, args=(targets, store, inbox_dir), daemon=True,
+        ).start()
+        flash(f"Retrying delivery for {len(targets)} clip(s)...", "info")
         return redirect(url_for("index"))
 
     @app.get("/clips")
@@ -409,6 +644,7 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         overlay_file = fields["overlay_file"]
         second_overlay_file = fields["second_overlay_file"]
         soundtrack_file = fields["soundtrack_file"]
+        background_file = fields["background_file"]
         project_name = fields["name"]
 
         inbox_dir = app.config["INBOX_DIR"]
@@ -419,7 +655,7 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         created_dir = not project_dir.exists()
         project_dir.mkdir(parents=True, exist_ok=True)
 
-        overlays_dir = _REPO_ROOT / "overlays"
+        overlays_dir = Path.cwd() / "overlays"
         overlays_dir.mkdir(parents=True, exist_ok=True)
         saved_overlays: list[Path] = []
 
@@ -448,6 +684,16 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
             soundtrack_file.save(soundtrack_path)
             data["soundtrack"] = f"soundtracks/{soundtrack_path.name}"
 
+        background_path = None
+        if background_file is not None:
+            _BACKGROUNDS_DIR.mkdir(parents=True, exist_ok=True)
+            fn = secure_filename(f"{project_name}_{background_file.filename}")
+            background_path = _BACKGROUNDS_DIR / fn
+            if background_path.exists():
+                background_path = _BACKGROUNDS_DIR / f"{background_path.stem}_{uuid4().hex[:8]}{background_path.suffix}"
+            background_file.save(background_path)
+            data["playback_background"] = f"backgrounds/{background_path.name}"
+
         config_path = project_dir / "config.json"
         save_config(project_dir, data, merge=False)
 
@@ -459,6 +705,8 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
                 ov.unlink(missing_ok=True)
             if soundtrack_path is not None:
                 soundtrack_path.unlink(missing_ok=True)
+            if background_path is not None:
+                background_path.unlink(missing_ok=True)
             if created_dir:
                 try:
                     project_dir.rmdir()
@@ -484,6 +732,33 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         if not (project_dir / "config.json").exists():
             abort(404)
         return project_dir
+
+    @app.post("/projects/<project>/toggle-orientation")
+    def toggle_orientation(project):
+        """Swap a project's resolution width/height (and recompute the
+        aspect_ratio label from that) so whatever footage lands next renders
+        in the other orientation. Nothing else in config.json changes, and
+        nothing already processed is touched - aspect_ratio is purely a
+        display label (see _aspect_ratio_label); the renderer only ever
+        reads width/height (see processor.py's build_ffmpeg_cmd)."""
+        project_dir = _resolve_project(project)
+        try:
+            config = load_config(project_dir)
+        except ConfigError as exc:
+            flash(f"Config problem: {exc}", "error")
+            return redirect(url_for("index") + "#clips")
+        new_width, new_height = config.height, config.width
+        save_config(project_dir, {
+            "resolution": f"{new_width}x{new_height}",
+            "aspect_ratio": _aspect_ratio_label(new_width, new_height),
+        }, merge=True)
+        orientation = "horizontal" if new_width > new_height else "vertical"
+        flash(
+            f"“{project}” now renders {orientation} ({new_width}x{new_height}) "
+            "for new footage — clips already processed are unaffected.",
+            "info",
+        )
+        return redirect(url_for("index") + "#clips")
 
     @app.route("/projects/<project>/clear-history", methods=["GET", "POST"])
     def clear_history(project):
@@ -600,6 +875,7 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         return render_template(
             "project_form.html", mode="edit", error=error, values=values,
             existing_overlay=data.get("overlay"), existing_second_overlay=data.get("second_overlay"),
+            existing_background=data.get("playback_background"),
             **_project_form_kwargs(),
         )
 
@@ -624,6 +900,7 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
                 "project_form.html", mode="edit", error=message, values=request.form,
                 existing_overlay=existing_data.get("overlay"),
                 existing_second_overlay=existing_data.get("second_overlay"),
+                existing_background=existing_data.get("playback_background"),
                 **_project_form_kwargs(),
             ), 400
 
@@ -634,10 +911,11 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
         overlay_file = fields["overlay_file"]
         second_overlay_file = fields["second_overlay_file"]
         soundtrack_file = fields["soundtrack_file"]
+        background_file = fields["background_file"]
         # Renaming isn't supported here — project_name is read-only on the
         # edit form; whatever the URL says for `project` always wins.
 
-        overlays_dir = _REPO_ROOT / "overlays"
+        overlays_dir = Path.cwd() / "overlays"
         overlays_dir.mkdir(parents=True, exist_ok=True)
 
         def _save_overlay(file_storage) -> str:
@@ -648,9 +926,10 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
             file_storage.save(dest)
             return f"overlays/{dest.name}"
 
-        # Only touch overlay/second_overlay/soundtrack when something new was
-        # actually uploaded this submission — otherwise leave the key out of
-        # `data` so save_config()'s merge preserves the existing reference.
+        # Only touch overlay/second_overlay/soundtrack/background when
+        # something new was actually uploaded this submission — otherwise
+        # leave the key out of `data` so save_config()'s merge preserves the
+        # existing reference.
         if overlay_file is not None:
             data["overlay"] = _save_overlay(overlay_file)
         if second_overlay_file is not None:
@@ -663,6 +942,14 @@ def create_app(inbox_dir: Path, store: JobStore) -> Flask:
                 soundtrack_path = _SOUNDTRACKS_DIR / f"{soundtrack_path.stem}_{uuid4().hex[:8]}{soundtrack_path.suffix}"
             soundtrack_file.save(soundtrack_path)
             data["soundtrack"] = f"soundtracks/{soundtrack_path.name}"
+        if background_file is not None:
+            _BACKGROUNDS_DIR.mkdir(parents=True, exist_ok=True)
+            fn = secure_filename(f"{project}_{background_file.filename}")
+            background_path = _BACKGROUNDS_DIR / fn
+            if background_path.exists():
+                background_path = _BACKGROUNDS_DIR / f"{background_path.stem}_{uuid4().hex[:8]}{background_path.suffix}"
+            background_file.save(background_path)
+            data["playback_background"] = f"backgrounds/{background_path.name}"
 
         save_config(project_dir, data, merge=True)
 
@@ -796,6 +1083,76 @@ def _rerender_worker(job: Job, config, store: JobStore) -> None:
         store.mark_error(job.id, f"Re-render failed: {exc}")
 
 
+def _rerender_all_worker(targets: list, store: JobStore) -> None:
+    """Bulk version of _rerender_worker - one ffmpeg render at a time (not
+    parallel), same reasoning as the watcher's own single-worker design."""
+    from .processor import process_job
+    for job, config in targets:
+        current = store.get_job(job.id)
+        if current is None:
+            continue
+        try:
+            process_job(current, config, store)
+        except Exception as exc:
+            logger.exception("Bulk re-render failed for job %s", current.id)
+            store.mark_error(current.id, f"Re-render failed: {exc}")
+
+
+def _retry_one_delivery(job: Job, config, store: JobStore, inbox_dir: Path) -> None:
+    """Re-run automatic delivery for one job whose auto-delivery previously
+    failed. Raises DriveError/EmailError/DeliveryError on failure - callers
+    decide how to surface/record it. Shared by the single-clip
+    retry_delivery route and the bulk retry_all_failed_deliveries route so
+    both run the exact same sequence."""
+    subject, body = "", ""
+    try:
+        raw_subject, raw_body = load_default_template()
+        subject = resolve_placeholders(raw_subject, link="{link}", project=job.project, filename=job.filename)
+        body = resolve_placeholders(raw_body, link="{link}", project=job.project, filename=job.filename)
+    except Exception:
+        pass
+    deliver(
+        job, config, store, inbox_dir,
+        recipient=config.recipient_email or None,
+        subject=subject, body=body, delivery_mode=config.delivery_mode,
+    )
+
+
+def _import_worker(folder: Path, filenames: list, dest_dir: Path, watcher: InboxWatcher) -> None:
+    """Move selected external files into a project's watch folder, then
+    nudge an immediate rescan. Moving IS the entire import step - no job is
+    created here; the watcher's normal detection (dedup, settle-check,
+    process_job) does the rest, fully reused and unmodified."""
+    for name in filenames:
+        src = folder / name
+        if not src.exists():
+            continue
+        dest = dest_dir / name
+        if dest.exists():
+            dest = dest_dir / f"{src.stem}_{uuid4().hex[:8]}{src.suffix}"
+        try:
+            shutil.move(str(src), str(dest))
+            logger.info("Imported %s -> %s", src, dest)
+        except OSError:
+            logger.exception("Could not import %s", src)
+    watcher.rescan_now()
+
+
+def _retry_all_deliveries_worker(targets: list, store: JobStore, inbox_dir: Path) -> None:
+    """Bulk version of _retry_one_delivery - sequential, not parallel, so a
+    pile of stuck clips from an outage doesn't fire off many concurrent
+    Drive uploads at once."""
+    for job, config in targets:
+        current = store.get_job(job.id)
+        if current is None or current.status != "ready":
+            continue
+        try:
+            _retry_one_delivery(current, config, store, inbox_dir)
+        except (DriveError, EmailError, DeliveryError) as exc:
+            logger.warning("Bulk retry delivery failed for job %s: %s", current.id, exc)
+            store.update_job(current.id, error=f"Auto-delivery failed: {exc}")
+
+
 def _compute_project_groups(inbox_dir: Path, store: JobStore) -> list[dict]:
     """Every project under inbox_dir, grouped by effective footage folder —
     projects sharing a folder are grouped together (with an "active" marker
@@ -829,6 +1186,20 @@ def _compute_project_groups(inbox_dir: Path, store: JobStore) -> list[dict]:
             "errors": errors,
         })
     return sorted(result, key=lambda g: g["folder"])
+
+
+def _project_orientations(inbox_dir: Path) -> list[dict]:
+    """Every valid project's current orientation, for the Clips tab's quick
+    vertical/horizontal switch bar - alphabetical, skips a project with a
+    broken config.json (already surfaced via its Projects-tab Edit link)."""
+    items = []
+    for project_dir in all_project_dirs(inbox_dir):
+        try:
+            cfg = load_config(project_dir)
+        except ConfigError:
+            continue
+        items.append({"name": project_dir.name, "is_vertical": cfg.height > cfg.width})
+    return sorted(items, key=lambda x: x["name"])
 
 
 def _list_soundtracks() -> list[str]:
@@ -946,6 +1317,7 @@ def _project_values_for_edit(data: dict, project_name: str) -> dict:
     values["source_dir"] = data.get("source_dir") or ""
     values["output_dir"] = data.get("output_dir") or ""
     values["drive_folder_id"] = data.get("drive_folder_id") or ""
+    values["playback_background_opacity"] = str(data.get("playback_background_opacity", 50))
 
     return values
 
@@ -957,10 +1329,12 @@ def _build_card(job: Job, inbox_dir: Path) -> dict:
     recipient_default = job.recipient_email or ""
     delivery_mode_default = job.delivery_mode or "email"
     config_error = None
+    is_vertical = None
     try:
         config = load_config(project_dir)
         recipient_default = job.recipient_email or config.recipient_email
         delivery_mode_default = job.delivery_mode or config.delivery_mode
+        is_vertical = config.height > config.width
     except ConfigError as exc:
         config_error = str(exc)
 
@@ -986,7 +1360,22 @@ def _build_card(job: Job, inbox_dir: Path) -> dict:
         "body_default": body_default,
         "delivery_mode_default": delivery_mode_default,
         "config_error": config_error,
+        "render_seconds": _render_seconds(job),
+        "is_vertical": is_vertical,
     }
+
+
+def _render_seconds(job: Job) -> float | None:
+    """Wall-clock time from job creation to its last update, in this
+    single-worker pipeline that's the render duration once a job reaches
+    'ready' - created_at/updated_at start equal (see JobStore.create_job)
+    and updated_at is refreshed exactly when mark_ready() runs."""
+    try:
+        started = datetime.fromisoformat(job.created_at)
+        finished = datetime.fromisoformat(job.updated_at)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, (finished - started).total_seconds())
 
 
 def _safe_project_name(raw: str) -> str | None:
@@ -1140,6 +1529,20 @@ def _parse_project_form(req):
     if err:
         return None, err
 
+    # --- Playback reel background (optional; falls back to the Glambot logo) ---
+    background_file = req.files.get("background_file")
+    if background_file is not None and not background_file.filename:
+        background_file = None
+    background_opacity_raw = form.get("playback_background_opacity", "").strip()
+    background_opacity = 50
+    if background_opacity_raw:
+        try:
+            background_opacity = int(background_opacity_raw)
+        except ValueError:
+            return None, "Background opacity must be a whole number."
+    if not (0 <= background_opacity <= 100):
+        return None, "Background opacity must be between 0 and 100."
+
     # --- Rotation / repositioning ---------------------------------------
     try:
         rotation = int(form.get("rotation", "0") or "0")
@@ -1272,6 +1675,7 @@ def _parse_project_form(req):
         "source_dir": str(Path(source_dir_raw).expanduser().resolve()) if source_dir_raw else None,
         "output_dir": str(Path(output_dir_raw).expanduser().resolve()) if output_dir_raw else None,
         "drive_folder_id": drive_folder_id,
+        "playback_background_opacity": background_opacity,
     }
     # Overlay position/scale/x/y are saved even without a new upload, so an
     # existing overlay's placement can be nudged/resized on its own (edit
@@ -1291,5 +1695,6 @@ def _parse_project_form(req):
         "overlay_file": overlay_file,
         "second_overlay_file": second_overlay_file,
         "soundtrack_file": soundtrack_file,
+        "background_file": background_file,
         "name": name,
     }, None

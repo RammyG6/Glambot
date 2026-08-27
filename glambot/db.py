@@ -6,8 +6,9 @@ A "job" is one piece of footage moving through the pipeline:
                        \-> rejected
     (any stage) -> error
 
-`ready` means the compressed/overlaid clip is sitting in Output_ReadytoSend/
-waiting for a human to approve or reject it in the review app.
+`ready` means the compressed/overlaid clip is sitting in Footage/ (with its
+thumbnail in Thumbnail/) waiting for a human to approve or reject it in the
+review app.
 """
 from __future__ import annotations
 
@@ -49,6 +50,15 @@ _NEW_COLUMNS = [
     # the same clip arriving at a second path (re-uploaded by FTP, renamed,
     # moved) isn't processed twice. See content_hash() in processor.py.
     ("content_hash", "TEXT"),
+    # Operator-controlled visibility on the kiosk screen only - orthogonal to
+    # `status` (a lifecycle field many call sites filter on exactly). Hiding
+    # never deletes or moves anything; see JobStore.set_hidden().
+    ("hidden_from_kiosk", "INTEGER NOT NULL DEFAULT 0"),
+    # Rendered clip length in seconds, probed via ffprobe right before
+    # mark_ready() (see processor.py). NULL for jobs rendered before this
+    # column existed - the review UI shows "-" for those rather than
+    # backfilling.
+    ("duration_seconds", "REAL"),
 ]
 
 
@@ -96,6 +106,8 @@ class Job:
     secondary_drive_link: Optional[str] = None
     progress: Optional[int] = None
     content_hash: Optional[str] = None
+    hidden_from_kiosk: int = 0
+    duration_seconds: Optional[float] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Job":
@@ -194,12 +206,15 @@ class JobStore:
 
     def mark_ready(self, job_id: int, output_path: str,
                    thumbnail_path: Optional[str] = None,
-                   secondary_output_path: Optional[str] = None) -> Job:
+                   secondary_output_path: Optional[str] = None,
+                   duration_seconds: Optional[float] = None) -> Job:
         fields: dict[str, Any] = dict(status="ready", output_path=output_path, error=None, progress=None)
         if thumbnail_path is not None:
             fields["thumbnail_path"] = thumbnail_path
         if secondary_output_path is not None:
             fields["secondary_output_path"] = secondary_output_path
+        if duration_seconds is not None:
+            fields["duration_seconds"] = duration_seconds
         return self.update_job(job_id, **fields)
 
     def mark_error(self, job_id: int, error: str) -> Job:
@@ -214,6 +229,11 @@ class JobStore:
 
     def mark_rejected(self, job_id: int) -> Job:
         return self.update_job(job_id, status="rejected")
+
+    def set_hidden(self, job_id: int, hidden: bool) -> Job:
+        """Toggle a clip's visibility on the kiosk screen. DB-only and fully
+        reversible - never touches status or any file on disk."""
+        return self.update_job(job_id, hidden_from_kiosk=1 if hidden else 0)
 
     def mark_sent(self, job_id: int, drive_link: str, output_path: str,
                    recipient_email: Optional[str] = None,

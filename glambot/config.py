@@ -44,26 +44,21 @@ MIN_DB, MAX_DB = -60.0, 12.0
 # These live here rather than in processor.py (where they're used) because
 # config validation has to reject them as a footage source, and config.py is
 # the only module low enough in the import graph for both to share them.
-OUTPUT_SUBDIR = "Output_ReadytoSend"
-SENT_SUBDIR = "Email Sent File"
+#
+# Two folders, split by file type rather than by delivery lifecycle stage:
+# every video artifact (rendered output, secondary-resolution output, the
+# archived original source) goes in Footage/; every image artifact (the
+# thumbnail, the thumbnail+QR "download photo") goes in Thumbnail/. Delivery
+# lifecycle (ready/sent/approved) lives only in the job's DB `status` column
+# now — files never move between folders as a job progresses.
+FOOTAGE_SUBDIR = "Footage"
+THUMBNAIL_SUBDIR = "Thumbnail"
 
-# QR-only ("Instant Download" / kiosk) projects use a separate on-disk layout
-# from email-mode projects.
-QR_OUTPUT_SUBDIR = "Output"
-QR_APPROVED_SUBDIR = "Selected Output"
-QR_DOWNLOAD_SUBDIR = "Instant Download"
-
-# Where processed originals are moved to, inside their own import folder.
-EDITED_FOOTAGES_SUBDIR = "Edited Footages"
-
-# Every folder name above, as one set. Two things key off it: the watcher
-# prunes these from its scans, and a project's footage source folder is not
-# allowed to sit inside one — pointing a project at, say, "Edited Footages"
-# makes it re-process every clip another project has already finished.
-MANAGED_SUBDIRS = frozenset({
-    OUTPUT_SUBDIR, SENT_SUBDIR, QR_OUTPUT_SUBDIR, QR_APPROVED_SUBDIR,
-    QR_DOWNLOAD_SUBDIR, EDITED_FOOTAGES_SUBDIR,
-})
+# Both folder names, as one set. Two things key off it: the watcher prunes
+# these from its scans, and a project's footage source folder is not allowed
+# to sit inside one — pointing a project at, say, "Footage" makes it
+# re-process every clip another project has already finished.
+MANAGED_SUBDIRS = frozenset({FOOTAGE_SUBDIR, THUMBNAIL_SUBDIR})
 
 
 def managed_subdir_in(path: Path) -> str | None:
@@ -118,6 +113,8 @@ class ProjectConfig:
     second_overlay_x: float | None = None
     second_overlay_y: float | None = None
     output_dir: Path | None = None
+    playback_background: str | None = None
+    playback_background_opacity: int = 50
 
     @property
     def width(self) -> int:
@@ -378,8 +375,8 @@ def load_config(project_dir: Path) -> ProjectConfig:
         managed = managed_subdir_in(source_dir)
         if managed:
             # Watching a folder Glambot writes into re-processes clips that
-            # are already finished — an "Edited Footages" source turns every
-            # archived original back into new footage, forever.
+            # are already finished — a "Footage" source turns every archived
+            # original back into new footage, forever.
             raise ConfigError(
                 f"{project_dir.name}/config.json: source_dir is inside Glambot's own "
                 f"'{managed}' folder ({source_dir}). That folder holds clips Glambot has "
@@ -410,6 +407,27 @@ def load_config(project_dir: Path) -> ProjectConfig:
         output_dir = output_dir_path.resolve()
     else:
         output_dir = None
+
+    # --- Playback reel background (optional; falls back to the Glambot logo) ---
+    background = data.get("playback_background")
+    background_path = None
+    if background:
+        p = Path(background)
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        if not p.exists():
+            raise ConfigError(
+                f"{project_dir.name}/config.json: playback background not found: {background}"
+            )
+        background_path = str(p)
+    background_opacity = _validate_int(
+        data.get("playback_background_opacity"), "playback_background_opacity", project_dir, default=50
+    )
+    if not (0 <= background_opacity <= 100):
+        raise ConfigError(
+            f"{project_dir.name}/config.json: 'playback_background_opacity' must be 0-100, "
+            f"got {background_opacity!r}"
+        )
 
     return ProjectConfig(
         recipient_email=recipient_email,
@@ -444,6 +462,8 @@ def load_config(project_dir: Path) -> ProjectConfig:
         second_overlay_x=second_overlay_x,
         second_overlay_y=second_overlay_y,
         output_dir=output_dir,
+        playback_background=background_path,
+        playback_background_opacity=background_opacity,
     )
 
 

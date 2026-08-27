@@ -6,7 +6,6 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
   body { max-width: 720px; margin: 3rem auto; padding: 0 1.5rem 3rem; }
-  .panel { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.5rem; }
   .danger { border-color: #ff8a80; }
   .warn { color: #ff8a80; font-weight: 600; }
   .note { color: var(--text-secondary); font-size: .9rem; }
@@ -17,9 +16,9 @@
   .targets .kept { color: var(--text-secondary); }
   .targets .kept .label::after { content: ' - kept'; font-weight: 400; color: var(--text-secondary); }
   .targets .gone .label { color: #ff8a80; }
-  .field { margin: 1rem 0; }
-  .field label { display: block; font-size: .85rem; margin-bottom: .3rem; }
-  .field input { width: 100%; max-width: 320px; }
+  .pw-field { margin: 1rem 0; }
+  .pw-field label { display: block; font-size: .85rem; margin-bottom: .3rem; }
+  .pw-field input { width: 100%; max-width: 320px; }
   .actions { display: flex; gap: .75rem; align-items: center; margin-top: 1.5rem; }
 </style>
 </head>
@@ -53,13 +52,13 @@
 
     <form method="post"
           onsubmit="return confirm('Permanently delete {{ project }} and the listed files? This cannot be undone.');">
-      <div class="field">
+      <div class="pw-field">
         <label for="password">Password</label>
         <input type="password" id="password" name="password" autocomplete="off" required>
       </div>
       <div class="actions">
-        <button type="submit">Delete permanently</button>
-        <a href="{{ url_for('index') }}">Cancel</a>
+        <button type="submit" class="btn btn-danger-ghost">Delete permanently</button>
+        <a href="{{ url_for('index') }}" class="btn btn-ghost">Cancel</a>
       </div>
     </form>
   </div>

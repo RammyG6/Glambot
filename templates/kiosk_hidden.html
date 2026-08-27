@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ project }} — Hidden clips</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  body { max-width: 1800px; background: var(--bg); color: var(--text); padding: 2rem 1.5rem 4rem; }
+  h1 { margin-bottom: .3rem; }
+  p.sub { color: var(--text-secondary); margin: 0 0 2rem; }
+  p.waiting { color: var(--text-secondary); font-size: 1.1rem; margin-top: 2rem; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.5rem; }
+  @media (max-width: 1100px) { .grid { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 700px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+  .clip { position: relative; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.1rem; text-align: center; }
+  .clip .thumb { width: 100%; max-height: 220px; object-fit: contain; border-radius: var(--radius); margin-bottom: .9rem; }
+  .clip .name { font-size: .85rem; color: var(--text-secondary); margin-bottom: .8rem; word-break: break-word; }
+  .unhide-btn { width: 100%; }
+</style>
+</head>
+<body>
+  <a class="back" href="{{ url_for('kiosk_live', project=project) }}">&larr; Back to kiosk</a>
+  <h1>Hidden clips</h1>
+  <p class="sub">{{ project }} — hidden from the kiosk screen but not deleted. Unhide to bring one back.</p>
+
+  <div class="grid" id="grid">
+    {% for item in items %}
+      <div class="clip" data-id="{{ item.job.id }}">
+        <img class="thumb" src="{{ url_for('thumbnail', job_id=item.job.id) }}" alt="Clip"
+             onerror="this.style.display='none'">
+        <div class="name">{{ item.job.filename }}</div>
+        <button type="button" class="btn btn-secondary unhide-btn" data-unhide-id="{{ item.job.id }}">Unhide</button>
+      </div>
+    {% endfor %}
+  </div>
+
+  <p class="waiting" id="waiting" {% if items %}style="display:none"{% endif %}>No hidden clips.</p>
+
+  <script>
+    (function () {
+      var grid = document.getElementById('grid');
+      grid.addEventListener('click', function (ev) {
+        var btn = ev.target.closest('.unhide-btn');
+        if (!btn) { return; }
+        var id = btn.dataset.unhideId;
+        fetch('/jobs/' + id + '/unhide', { method: 'POST' })
+          .then(function () { var tile = btn.closest('.clip'); if (tile) { tile.remove(); } });
+      });
+    })();
+  </script>
+</body>
+</html>

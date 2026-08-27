@@ -5,284 +5,585 @@
 <title>Glambot Automation</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  .banner { width: 100%; max-height: 260px; object-fit: cover; border-radius: var(--radius-lg); margin: 1rem 0 1.5rem; display: block; }
-  .shared-folders { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.25rem 1.5rem; margin-bottom: 2rem; }
-  .shared-folder { padding: .6rem 0; border-bottom: 1px solid var(--border); }
-  .shared-folder:last-child { border-bottom: none; }
-  .shared-folder .path { font-size: .82rem; color: var(--text-secondary); margin-bottom: .5rem; word-break: break-all; }
-  .shared-folder ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .6rem; }
-  .shared-folder li { display: flex; align-items: center; gap: .5rem; background: var(--bg-elevated-2); border-radius: 980px; padding: .4rem .5rem .4rem .9rem; font-size: .85rem; }
-  .shared-folder li.active { background: rgba(0, 113, 227, 0.18); color: var(--accent); font-weight: 600; }
-  .shared-folder li form { margin: 0; }
-  .shared-folder li button { margin: 0; padding: .3rem .8rem; font-size: .78rem; }
-  .shared-folder li a { font-size: .78rem; white-space: nowrap; }
-  .shared-folder li .config-error { color: #ff8a80; font-size: .78rem; cursor: help; }
-  .shared-folder .shared-note { color: var(--accent); }
-  .shared-folder li a.danger-link { color: #ff8a80; }
-  .shared-folders a.delete-all { float: right; font-size: .8rem; font-weight: 400; color: #ff8a80; }
-  .processing { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.25rem 1.5rem; margin-bottom: 2rem; }
-  .proc-item { padding: .5rem 0; }
-  .proc-item .proc-label { font-size: .9rem; margin-bottom: .4rem; }
-  .proc-item .proc-label .pct { color: var(--accent); font-weight: 600; float: right; }
-  .bar { height: 8px; background: var(--bg-elevated-2); border-radius: 980px; overflow: hidden; }
-  .bar > span { display: block; height: 100%; background: var(--accent); border-radius: 980px; transition: width .4s ease; }
-  .bar.indeterminate > span { width: 35% !important; animation: slide 1.2s ease-in-out infinite; }
+  body { max-width: none; padding: 0; margin: 0; }
+  .banner { width: 100%; max-height: 220px; object-fit: cover; border-radius: var(--radius-lg); margin: 0 0 1.5rem; display: block; }
+  .clip-bar.indeterminate > span { width: 35% !important; animation: slide 1.2s ease-in-out infinite; }
   @keyframes slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
-  .log-toggle { margin-top: 2.5rem; }
-  .log-toggle button { margin-top: 0; }
-  .log-body { margin-top: 1rem; }
-  .auto-failed { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.25rem 1.5rem; margin-bottom: 2rem; }
-  .auto-failed .af-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .6rem 0; border-bottom: 1px solid var(--border); }
-  .auto-failed .af-row:last-child { border-bottom: none; }
-  .auto-failed .af-info { font-size: .88rem; }
-  .auto-failed .af-info .af-err { color: #ff8a80; font-size: .8rem; margin-top: .2rem; }
-  .auto-failed .af-row form { margin: 0; }
-  .auto-failed .af-row button { margin: 0; }
+  .video-frame { border-radius: 14px; overflow: hidden; margin-bottom: 1.25rem; background: #000; }
+  .video-frame video { width: 100%; max-height: 380px; display: block; }
+  @media (max-width: 900px) {
+    .sidebar { position: static; height: auto; width: 100% !important; }
+    .app-shell { flex-direction: column; }
+    .main { padding: 1.5rem 1.25rem 3rem; }
+  }
 </style>
 </head>
 <body>
-  <h1>Glambot Automation</h1>
-  <img class="banner" src="{{ url_for('static', filename='glambot-banner.jpg') }}" alt="Glambot">
-  <p class="hint">Nothing is uploaded or emailed until you click Approve on a clip below.</p>
-  <p><a href="{{ url_for('new_project_form') }}">+ New Project</a>
-     &nbsp;·&nbsp; <a href="{{ url_for('edited_clips') }}">Email a delivered clip</a></p>
+<div class="app-shell">
 
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% for category, message in messages %}
-      <div class="flash {{ category }}">{{ message }}</div>
-    {% endfor %}
-  {% endwith %}
+  {% set nav_mode = 'tabs' %}
+  {% set active_tab = 'clips' %}
+  {% set clips_count = (processing_jobs|length) + (auto_failed|length) + (cards|length) %}
+  {% set projects_count = project_groups | map(attribute='projects') | map('length') | sum %}
+  {% set errors_count = error_jobs|length %}
+  {% set email_count = email_log|length %}
+  {% set output_count = output_log|length %}
+  {% include '_sidebar.html' %}
 
-  <div class="shared-folders">
-    <h2 style="margin-top:0">
-      Projects
-      {% if project_groups %}
-        <a class="danger-link delete-all" href="{{ url_for('delete_all_projects') }}">Delete all&hellip;</a>
-      {% endif %}
-    </h2>
-    {% if not project_groups %}
-      <p class="empty">No projects yet.</p>
-    {% endif %}
-    {% for pg in project_groups %}
-      <div class="shared-folder">
-        <div class="path">
-          <code>{{ pg.folder }}</code>
-          {% if pg.shared %}<span class="shared-note">· shared by {{ pg.projects | length }} projects</span>{% endif %}
-        </div>
-        <ul>
-          {% for p in pg.projects %}
-            <li class="{{ 'active' if pg.shared and p == pg.active else '' }}">
-              {{ p }}{% if pg.shared and p == pg.active %} · active{% endif %}
-              {% if pg.errors.get(p) %}<span class="config-error" title="{{ pg.errors[p] }}">&#9888; config error</span>{% endif %}
-              {% if pg.shared and p != pg.active %}
-                <form method="post" action="{{ url_for('set_active_folder_project') }}">
-                  <input type="hidden" name="folder" value="{{ pg.folder }}">
-                  <input type="hidden" name="project" value="{{ p }}">
-                  <button type="submit" class="secondary">Make active</button>
-                </form>
-              {% endif %}
-              <a href="{{ url_for('kiosk_live', project=p) }}">Kiosk monitor &rarr;</a>
-              <a href="{{ url_for('edit_project_form', project=p) }}">Edit settings</a>
-              <a href="{{ url_for('clear_history', project=p) }}">Clear history</a>
-              <a class="danger-link" href="{{ url_for('delete_project', project=p) }}">Delete</a>
-            </li>
-          {% endfor %}
-        </ul>
-      </div>
-    {% endfor %}
-  </div>
+  <!-- ============ MAIN ============ -->
+  <div class="main">
 
-  <div class="processing" id="processingSection" style="{{ '' if processing_jobs else 'display:none' }}">
-    <h2 style="margin-top:0">Now processing</h2>
-    <div id="processingList">
-      {% for job in processing_jobs %}
-        <div class="proc-item" data-job="{{ job.id }}">
-          <div class="proc-label">{{ job.project }} / {{ job.filename }}
-            <span class="pct">{{ (job.progress ~ '%') if job.progress is not none else '' }}</span></div>
-          <div class="bar {{ 'indeterminate' if job.progress is none else '' }}"><span style="width: {{ job.progress or 0 }}%"></span></div>
-        </div>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
       {% endfor %}
-    </div>
-  </div>
+    {% endwith %}
 
-  {% if auto_failed %}
-    <div class="auto-failed">
-      <h2 style="margin-top:0">Auto-delivery needs attention</h2>
-      {% for job in auto_failed %}
-        <div class="af-row">
-          <div class="af-info">
-            {{ job.project }} / {{ job.filename }}
-            <div class="af-err">{{ job.error }}</div>
-          </div>
-          <form method="post" action="{{ url_for('retry_delivery', job_id=job.id) }}">
-            <button type="submit">Retry</button>
+    <!-- ============ TAB: CLIPS ============ -->
+    <section class="tab-panel" data-panel="clips">
+      <img class="banner" src="{{ url_for('static', filename='glambot-banner.jpg') }}" alt="Glambot">
+      <div class="main-head">
+        <h1>Clips</h1>
+        <div style="display:flex;gap:.6rem;flex-wrap:wrap">
+          <a href="{{ url_for('edited_clips') }}" class="btn btn-secondary btn-sm">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6l9 6 9-6"/><rect x="3" y="5" width="18" height="14" rx="2"/></svg>
+            Email a delivered clip
+          </a>
+          <form method="post" action="{{ url_for('rescan') }}" style="display:inline">
+            <button type="submit" class="btn btn-ghost btn-sm">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 1 2.6 6.3M3 12V6m0 6h6"/></svg>
+              Rescan all watch folders now
+            </button>
           </form>
         </div>
-      {% endfor %}
-    </div>
-  {% endif %}
+      </div>
+      <p class="main-sub">Nothing is uploaded or emailed until you click Approve on a clip below.</p>
 
-  {% if not cards %}
-    <p class="empty">No clips waiting for review right now.</p>
-  {% endif %}
-
-  {% for card in cards %}
-    {% set job = card.job %}
-    <div class="card">
-      <strong>{{ job.project }}</strong> / {{ job.filename }}
-      <div class="meta">Job #{{ job.id }} · ready since {{ job.updated_at }}</div>
-
-      {% if card.config_error %}
-        <div class="flash error">Config problem: {{ card.config_error }}</div>
+      {% if project_orientations %}
+        <div class="section">
+          <div class="section-head">
+            <h2 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+              Projects <span class="count-badge">{{ project_orientations|length }}</span>
+            </h2>
+          </div>
+          <div class="panel">
+            {% for po in project_orientations %}
+              <div class="proc-row" style="display:flex;align-items:center;justify-content:space-between;gap:1rem">
+                <div class="proc-label">{{ po.name }}</div>
+                <form method="post" action="{{ url_for('toggle_orientation', project=po.name) }}" style="display:inline">
+                  <button type="submit" class="btn btn-secondary btn-sm">
+                    {% if po.is_vertical %}
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="8" width="16" height="8" rx="1.5"/></svg>
+                      Switch to Horizontal
+                    {% else %}
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="4" width="8" height="16" rx="1.5"/></svg>
+                      Switch to Vertical
+                    {% endif %}
+                  </button>
+                </form>
+              </div>
+            {% endfor %}
+          </div>
+        </div>
       {% endif %}
-      {% if job.error %}
-        <div class="flash error">Last attempt failed: {{ job.error }}</div>
-      {% endif %}
 
-      <video controls preload="metadata">
-        <source src="{{ url_for('video', job_id=job.id) }}" type="video/mp4">
-      </video>
-
-      <form method="post" action="{{ url_for('approve', job_id=job.id) }}" class="approve-form">
-        <label for="delivery_mode-{{ job.id }}">Delivery method</label>
-        <select id="delivery_mode-{{ job.id }}" name="delivery_mode" class="delivery-mode-select">
-          <option value="email" {% if card.delivery_mode_default == 'email' %}selected{% endif %}>Email to client</option>
-          <option value="qr_only" {% if card.delivery_mode_default == 'qr_only' %}selected{% endif %}>Instant QR download (kiosk)</option>
-        </select>
-
-        <div class="email-fields">
-          <label for="recipient-{{ job.id }}">Recipient email</label>
-          <input type="email" id="recipient-{{ job.id }}" name="recipient_email"
-                 value="{{ card.recipient_default }}">
-
-          <label for="subject-{{ job.id }}">Subject</label>
-          <input type="text" id="subject-{{ job.id }}" name="subject"
-                 value="{{ card.subject_default }}">
-
-          <label for="body-{{ job.id }}">
-            Message
-            <span class="hint">— {{ '{link}' }} is filled in automatically once the file uploads</span>
-          </label>
-          <textarea id="body-{{ job.id }}" name="body">{{ card.body_default }}</textarea>
+      <!-- Now processing: always in the DOM (even empty) - the /status poll
+           below shows/hides it and rewrites #processingList live. -->
+      <div class="section" id="processingSection" style="{{ '' if processing_jobs else 'display:none' }}">
+        <div class="section-head">
+          <h2 class="section-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg>
+            Now Processing
+          </h2>
         </div>
-
-        <div class="actions">
-          <button type="submit" class="approve">Approve &amp; Send</button>
-        </div>
-      </form>
-      <form method="post" action="{{ url_for('reject', job_id=job.id) }}" style="display:inline">
-        <div class="actions">
-          <button type="submit" class="reject">Reject</button>
-        </div>
-      </form>
-    </div>
-  {% endfor %}
-
-  {% if error_jobs %}
-    <h2>Errors</h2>
-    <ul class="error-list">
-      {% for job in error_jobs %}
-        <li>
-          <div class="error-what">{{ job.project }} / {{ job.filename }}</div>
-          <div class="error-why">{{ job.error }}</div>
-          {% if job.can_rerender %}
-            <form method="post" action="{{ url_for('rerender', job_id=job.id) }}">
-              <button type="submit" class="secondary">Re-render</button>
-            </form>
-          {% else %}
-            <div class="error-why">Source file is gone - cannot re-render.</div>
-          {% endif %}
-        </li>
-      {% endfor %}
-    </ul>
-  {% endif %}
-
-  <div class="log-toggle">
-    <button type="button" class="secondary" data-log="output">Show output log</button>
-    <div class="log-body hidden" id="log-output">
-      {% if output_log %}
-        <ul class="sent-list">
-          {% for job in output_log %}
-            <li>{{ job.project }} / {{ job.filename }} — {{ job.status }} ({{ job.updated_at }})</li>
+        <div class="panel" id="processingList">
+          {% for job in processing_jobs %}
+            <div class="proc-row" data-job="{{ job.id }}">
+              <div class="proc-top">
+                <div class="proc-label">{{ job.project }} <span class="sub">/ {{ job.filename }}</span></div>
+                <span class="pct-badge">{{ (job.progress ~ '%') if job.progress is not none else '' }}</span>
+              </div>
+              <div class="clip-bar {{ 'indeterminate' if job.progress is none else '' }}"><span style="width: {{ job.progress or 0 }}%"></span></div>
+              <div class="proc-bottom">
+                <form method="post" action="{{ url_for('stop_job', job_id=job.id) }}" class="proc-stop">
+                  <button type="submit" class="btn btn-ghost btn-sm">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+                    Stop
+                  </button>
+                </form>
+              </div>
+            </div>
           {% endfor %}
-        </ul>
-      {% else %}
-        <p class="empty">No clips processed yet.</p>
-      {% endif %}
-    </div>
-  </div>
+        </div>
+      </div>
 
-  <div class="log-toggle">
-    <button type="button" class="secondary" data-log="email">Show email sent log</button>
-    <div class="log-body hidden" id="log-email">
-      {% if email_log %}
-        <ul class="sent-list">
-          {% for job in email_log %}
-            <li>{{ job.project }} / {{ job.filename }} → {{ job.recipient_email }} ({{ job.sent_at }})
-              {% if job.drive_link %}· <a href="{{ job.drive_link }}" target="_blank">link</a>{% endif %}</li>
+      {% if auto_failed %}
+        <div class="section">
+          <div class="section-head">
+            <h2 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9L2.7 17a1.6 1.6 0 0 0 1.4 2.4h15.8a1.6 1.6 0 0 0 1.4-2.4L13.7 3.9a1.6 1.6 0 0 0-2.8 0z"/></svg>
+              Auto-Delivery Needs Attention
+            </h2>
+            {% if auto_failed | length > 1 %}
+              <form method="post" action="{{ url_for('retry_all_failed_deliveries') }}">
+                <button type="submit" class="btn btn-secondary btn-sm">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 1 2.6 6.3M3 12V6m0 6h6"/></svg>
+                  Retry all
+                </button>
+              </form>
+            {% endif %}
+          </div>
+          <div class="panel">
+            {% for job in auto_failed %}
+              <div class="af-row-panel" style="display:flex;align-items:center;justify-content:space-between;gap:1.25rem">
+                <div>
+                  <div class="project-label">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+                    {{ job.project }}
+                  </div>
+                  <div style="font-size:.88rem;font-weight:600">{{ job.filename }}</div>
+                  <div style="display:flex;align-items:center;gap:.35rem;color:#ff8a80;font-size:.8rem;margin-top:.3rem">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/></svg>
+                    {{ job.error }}
+                  </div>
+                </div>
+                <form method="post" action="{{ url_for('retry_delivery', job_id=job.id) }}">
+                  <button type="submit" class="btn btn-secondary btn-sm">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 1 2.6 6.3M3 12V6m0 6h6"/></svg>
+                    Retry
+                  </button>
+                </form>
+              </div>
+            {% endfor %}
+          </div>
+        </div>
+      {% endif %}
+
+      {% if not cards and not sent_cards and not processing_jobs and not auto_failed %}
+        <p class="empty">No clips waiting for review right now.</p>
+      {% endif %}
+
+      {% if cards %}
+        <div class="section">
+          <div class="section-head">
+            <h2 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v12H4z"/><path d="M8 20h8M12 16v4"/></svg>
+              Ready for Review <span class="count-badge">{{ cards|length }}</span>
+            </h2>
+          </div>
+
+          {% for card in cards %}
+            {% set job = card.job %}
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <div class="project-label">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+                    {{ job.project }}
+                  </div>
+                  <div class="card-title" style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+                    {{ job.filename }}
+                    {% if card.is_vertical is not none %}
+                      <form method="post" action="{{ url_for('toggle_orientation', project=job.project) }}" style="display:inline">
+                        <button type="submit" class="btn-link" style="text-transform:none;letter-spacing:normal;font-weight:600;font-size:.78rem"
+                                title="Applies to this project's next-processed footage only — this clip is unaffected">
+                          {% if card.is_vertical %}
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="8" width="16" height="8" rx="1.5"/></svg>
+                            Switch next clips to Horizontal
+                          {% else %}
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="4" width="8" height="16" rx="1.5"/></svg>
+                            Switch next clips to Vertical
+                          {% endif %}
+                        </button>
+                      </form>
+                    {% endif %}
+                  </div>
+                  <div class="card-meta-line">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+                    Job #{{ job.id }} &middot; ready since {{ job.updated_at }}
+                    &middot; rendered in {{ card.render_seconds | mmss }} &middot; clip length {{ job.duration_seconds | mmss }}
+                  </div>
+                </div>
+                <span class="mode-pill {{ 'qr' if card.delivery_mode_default == 'qr_only' else 'email' }}">
+                  {% if card.delivery_mode_default == 'qr_only' %}
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                    Kiosk QR
+                  {% else %}
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6l9 6 9-6"/><rect x="3" y="5" width="18" height="14" rx="2"/></svg>
+                    Email
+                  {% endif %}
+                </span>
+              </div>
+
+              {% if card.config_error %}
+                <div class="flash error">Config problem: {{ card.config_error }}</div>
+              {% endif %}
+              {% if job.error %}
+                <div class="flash error">Last attempt failed: {{ job.error }}</div>
+              {% endif %}
+
+              <div class="video-frame">
+                <video controls preload="metadata">
+                  <source src="{{ url_for('video', job_id=job.id) }}" type="video/mp4">
+                </video>
+              </div>
+
+              <form method="post" action="{{ url_for('approve', job_id=job.id) }}" class="approve-form">
+                <div class="field">
+                  <label for="delivery_mode-{{ job.id }}">Delivery method</label>
+                  <select id="delivery_mode-{{ job.id }}" name="delivery_mode" class="delivery-mode-select">
+                    <option value="email" {% if card.delivery_mode_default == 'email' %}selected{% endif %}>Email to client</option>
+                    <option value="qr_only" {% if card.delivery_mode_default == 'qr_only' %}selected{% endif %}>Instant QR download (kiosk)</option>
+                  </select>
+                </div>
+
+                <div class="email-fields">
+                  <div class="field">
+                    <label for="recipient-{{ job.id }}">Recipient email</label>
+                    <input type="email" id="recipient-{{ job.id }}" name="recipient_email"
+                           value="{{ card.recipient_default }}">
+                  </div>
+                  <div class="field">
+                    <label for="subject-{{ job.id }}">Subject</label>
+                    <input type="text" id="subject-{{ job.id }}" name="subject"
+                           value="{{ card.subject_default }}">
+                  </div>
+                  <div class="field">
+                    <label for="body-{{ job.id }}">
+                      Message
+                      <span class="field-hint">— {{ '{link}' }} is filled in automatically once the file uploads</span>
+                    </label>
+                    <textarea id="body-{{ job.id }}" name="body">{{ card.body_default }}</textarea>
+                  </div>
+                </div>
+
+                <div class="card-actions-row">
+                  <button type="submit" class="btn btn-primary">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l5 5L20 6"/></svg>
+                    Approve &amp; Send
+                  </button>
+                </div>
+              </form>
+              <form method="post" action="{{ url_for('reject', job_id=job.id) }}" style="display:inline">
+                <button type="submit" class="btn btn-danger-ghost" style="margin-top:.65rem">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                  Reject
+                </button>
+              </form>
+            </div>
           {% endfor %}
-        </ul>
-      {% else %}
-        <p class="empty">No email deliveries yet.</p>
+        </div>
       {% endif %}
-    </div>
-  </div>
 
-  <script>
-    document.querySelectorAll('.approve-form').forEach(function (form) {
-      var select = form.querySelector('.delivery-mode-select');
-      var emailFields = form.querySelector('.email-fields');
-      function sync() {
-        emailFields.style.display = select.value === 'qr_only' ? 'none' : '';
-      }
-      select.addEventListener('change', sync);
-      sync();
+      {% if sent_cards %}
+        <div class="section">
+          <div class="section-head">
+            <h2 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l5 5L20 6"/></svg>
+              Recently Sent
+            </h2>
+            <button type="button" class="btn-link" data-clear-log="sent">Clear</button>
+          </div>
+          <div data-log-list="sent">
+          {% for sc in sent_cards %}
+            {% set job = sc.job %}
+            <div class="clip-row" data-id="{{ job.id }}">
+              <div class="clip-thumb tone-{{ ['a','b','c'][loop.index0 % 3] }}">
+                <svg class="play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              </div>
+              <div class="clip-body">
+                <div class="clip-top">
+                  <div>
+                    <div class="project-label">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+                      {{ job.project }}
+                    </div>
+                    <div class="clip-title">{{ job.filename }}</div>
+                  </div>
+                  <span class="status-badge sent">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l5 5L20 6"/></svg>
+                    {{ 'Delivered via QR' if job.delivery_mode == 'qr_only' else 'Sent' }}
+                  </span>
+                </div>
+                <div class="clip-meta">
+                  <span class="item">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+                    Rendered in {{ sc.render_seconds | mmss }}
+                  </span>
+                  <span class="item">Clip length {{ job.duration_seconds | mmss }}</span>
+                  {% if job.delivery_mode == 'email' %}
+                    <span class="item">To {{ job.recipient_email }} &middot; {{ job.sent_at }}</span>
+                  {% else %}
+                    <span class="item">Sent {{ job.sent_at }}</span>
+                  {% endif %}
+                  {% if job.drive_link %}
+                    <a class="link-out" href="{{ job.drive_link }}" target="_blank" rel="noopener">
+                      Drive link
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg>
+                    </a>
+                  {% endif %}
+                </div>
+                {% if job.delivery_mode == 'qr_only' and job.drive_link %}
+                  <div class="clip-actions">
+                    <span class="spacer"></span>
+                    <a href="{{ url_for('edited_clips') }}" class="btn btn-secondary btn-sm">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6l9 6 9-6"/><rect x="3" y="5" width="18" height="14" rx="2"/></svg>
+                      Send email
+                    </a>
+                  </div>
+                {% endif %}
+              </div>
+            </div>
+          {% endfor %}
+          </div>
+          <p class="empty" data-log-empty="sent" style="display:none">No delivered clips yet.</p>
+        </div>
+      {% endif %}
+    </section>
+
+    <!-- ============ TAB: PROJECTS ============ -->
+    <section class="tab-panel hidden" data-panel="projects">
+      <div class="main-head">
+        <h1>Projects</h1>
+        {% if project_groups %}
+          <a class="btn-link danger" href="{{ url_for('delete_all_projects') }}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+            Delete all&hellip;
+          </a>
+        {% endif %}
+      </div>
+      <p class="main-sub">Watch folders and the projects they feed.</p>
+
+      {% if not project_groups %}
+        <p class="empty">No projects yet.</p>
+      {% else %}
+        <div class="panel">
+          {% for pg in project_groups %}
+            <div class="folder-group">
+              <div class="folder-path">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+                <code>{{ pg.folder }}</code>
+                {% if pg.shared %}<span class="shared-tag">&middot; shared by {{ pg.projects | length }} projects</span>{% endif %}
+              </div>
+              <div class="chip-row">
+                {% for p in pg.projects %}
+                  <div class="chip {{ 'active' if pg.shared and p == pg.active else '' }}">
+                    {% if pg.shared and p == pg.active %}<span class="dot"></span>{% endif %}
+                    {{ p }}{% if pg.shared and p == pg.active %} &middot; active{% endif %}
+                    {% if pg.errors.get(p) %}
+                      <span class="chip-warn" title="{{ pg.errors[p] }}">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9L2.7 17a1.6 1.6 0 0 0 1.4 2.4h15.8a1.6 1.6 0 0 0 1.4-2.4L13.7 3.9a1.6 1.6 0 0 0-2.8 0z"/></svg>
+                        config error
+                      </span>
+                    {% endif %}
+                    {% if pg.shared and p != pg.active %}
+                      <form method="post" action="{{ url_for('set_active_folder_project') }}">
+                        <input type="hidden" name="folder" value="{{ pg.folder }}">
+                        <input type="hidden" name="project" value="{{ p }}">
+                        <button type="submit" class="chip-btn">Make active</button>
+                      </form>
+                    {% endif %}
+                    <div class="chip-divider"></div>
+                    <div class="chip-links">
+                      <a href="{{ url_for('kiosk_live', project=p) }}" target="_blank" rel="noopener">
+                        Kiosk monitor <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg>
+                      </a>
+                      <a href="{{ url_for('playback_reel', project=p) }}" target="_blank" rel="noopener">
+                        Playback reel <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg>
+                      </a>
+                      <a href="{{ url_for('edit_project_form', project=p) }}" target="_blank" rel="noopener">Edit settings</a>
+                      <a href="{{ url_for('import_footage_form', project=p) }}" target="_blank" rel="noopener">Import existing footage</a>
+                      <a href="{{ url_for('clear_history', project=p) }}" target="_blank" rel="noopener">Clear history</a>
+                      <a class="danger-link" href="{{ url_for('delete_project', project=p) }}" target="_blank" rel="noopener">Delete</a>
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </section>
+
+    <!-- ============ TAB: OUTPUT ============ -->
+    <section class="tab-panel hidden" data-panel="output">
+      <div class="main-head">
+        <h1>Output</h1>
+        <button type="button" class="btn-link" data-clear-log="output">Clear</button>
+      </div>
+      <p class="main-sub">Every clip processed or edited, regardless of delivery mode.</p>
+      <ul class="sent-list" data-log-list="output" style="list-style:none;padding:0">
+        {% for job in output_log %}
+          <li data-id="{{ job.id }}" class="log-row" style="display:block">
+            {{ job.project }} / {{ job.filename }} — {{ job.status }} ({{ job.updated_at }})
+          </li>
+        {% endfor %}
+      </ul>
+      <p class="empty" data-log-empty="output" style="display:none">No clips processed yet.</p>
+    </section>
+
+    <!-- ============ TAB: ERRORS ============ -->
+    <section class="tab-panel hidden" data-panel="errors">
+      <div class="main-head">
+        <h1>Errors</h1>
+        {% if error_jobs | selectattr('can_rerender') | list | length > 1 %}
+          <form method="post" action="{{ url_for('retry_all_failed_renders') }}">
+            <button type="submit" class="btn btn-secondary btn-sm">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 1 2.6 6.3M3 12V6m0 6h6"/></svg>
+              Retry all
+            </button>
+          </form>
+        {% endif %}
+      </div>
+      <div class="main-head" style="margin-top:-1rem">
+        <span></span>
+        <button type="button" class="btn-link" data-clear-log="errors">Clear</button>
+      </div>
+      <ul class="error-list" data-log-list="errors" style="list-style:none;padding:0">
+        {% for job in error_jobs %}
+          <li data-id="{{ job.id }}" class="log-row" style="display:block">
+            <div class="log-what">{{ job.project }} / {{ job.filename }}</div>
+            <div class="log-why">{{ job.error }}</div>
+            {% if job.can_rerender %}
+              <form method="post" action="{{ url_for('rerender', job_id=job.id) }}" style="margin-top:.5rem">
+                <button type="submit" class="btn btn-secondary btn-sm">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 1 2.6 6.3M3 12V6m0 6h6"/></svg>
+                  Re-render
+                </button>
+              </form>
+            {% else %}
+              <div class="log-why">Source file is gone - cannot re-render.</div>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+      <p class="empty" data-log-empty="errors" style="display:none">No errors.</p>
+    </section>
+
+  </div>
+</div>
+
+<script>
+  // ---- Tab switching (sidebar nav <-> .tab-panel), remembered per-browser. ----
+  (function () {
+    var navItems = document.querySelectorAll('.nav-item[data-tab]');
+    var panels = document.querySelectorAll('.tab-panel[data-panel]');
+    function show(tab) {
+      navItems.forEach(function (btn) { btn.classList.toggle('active', btn.dataset.tab === tab); });
+      panels.forEach(function (p) { p.classList.toggle('hidden', p.dataset.panel !== tab); });
+      localStorage.setItem('glambot-active-tab', tab);
+    }
+    navItems.forEach(function (btn) {
+      btn.addEventListener('click', function () { show(btn.dataset.tab); });
     });
+    // Cross-page links (e.g. the sidebar on project_form.html/edited_clips.html)
+    // point here as /#projects etc. so landing on the right tab doesn't
+    // depend on this browser's remembered localStorage state.
+    var hashTab = location.hash.replace('#', '');
+    var validTabs = Array.from(panels).map(function (p) { return p.dataset.panel; });
+    show(validTabs.indexOf(hashTab) !== -1 ? hashTab : (localStorage.getItem('glambot-active-tab') || 'clips'));
+  })();
 
-    // Collapsible logs, state remembered per-log in localStorage.
-    document.querySelectorAll('.log-toggle button').forEach(function (btn) {
-      var key = 'glambot-log-' + btn.dataset.log;
-      var body = document.getElementById('log-' + btn.dataset.log);
-      var noun = btn.dataset.log === 'output' ? 'output log' : 'email sent log';
-      function render(open) {
-        body.classList.toggle('hidden', !open);
-        btn.textContent = (open ? 'Hide ' : 'Show ') + noun;
-      }
-      render(localStorage.getItem(key) === 'open');
-      btn.addEventListener('click', function () {
-        var open = body.classList.contains('hidden');
-        localStorage.setItem(key, open ? 'open' : 'closed');
-        render(open);
+  // ---- Sidebar collapse toggle, remembered per-browser. ----
+  (function () {
+    var sidebar = document.getElementById('sidebar');
+    var btn = document.getElementById('sidebarCollapseBtn');
+    function render(collapsed) { sidebar.classList.toggle('collapsed', collapsed); }
+    render(localStorage.getItem('glambot-sidebar-collapsed') === 'yes');
+    btn.addEventListener('click', function () {
+      var collapsed = !sidebar.classList.contains('collapsed');
+      localStorage.setItem('glambot-sidebar-collapsed', collapsed ? 'yes' : 'no');
+      render(collapsed);
+    });
+  })();
+
+  // ---- Delivery-mode select toggles the email-only fields. ----
+  document.querySelectorAll('.approve-form').forEach(function (form) {
+    var select = form.querySelector('.delivery-mode-select');
+    var emailFields = form.querySelector('.email-fields');
+    function sync() {
+      emailFields.style.display = select.value === 'qr_only' ? 'none' : '';
+    }
+    select.addEventListener('change', sync);
+    sync();
+  });
+
+  // ---- Clear = hide everything currently in that log, remembered per-browser. ----
+  // Nothing is deleted server-side; entries with a newer id still show up later.
+  function updateEmptyState(log) {
+    var list = document.querySelector('[data-log-list="' + log + '"]');
+    var empty = document.querySelector('[data-log-empty="' + log + '"]');
+    if (!list || !empty) return;
+    empty.style.display = list.querySelector('[data-id]') ? 'none' : '';
+  }
+  // The nav badge is rendered server-side from the full (uncleared) list, so
+  // after a Clear (or on load, if a clear threshold from a previous visit
+  // already trimmed the list) it needs to be corrected to the count of what
+  // actually remains visible.
+  function updateBadge(log) {
+    var list = document.querySelector('[data-log-list="' + log + '"]');
+    var badge = document.querySelector('[data-badge="' + log + '"]');
+    if (!list || !badge) return;
+    var count = list.querySelectorAll('[data-id]').length;
+    badge.textContent = count;
+    badge.style.display = count ? '' : 'none';
+  }
+  document.querySelectorAll('[data-clear-log]').forEach(function (btn) {
+    var log = btn.dataset.clearLog;
+    btn.addEventListener('click', function () {
+      var list = document.querySelector('[data-log-list="' + log + '"]');
+      if (!list) return;
+      var ids = Array.from(list.querySelectorAll('[data-id]')).map(function (li) { return parseInt(li.dataset.id, 10); });
+      var maxId = ids.length ? Math.max.apply(null, ids) : 0;
+      localStorage.setItem('glambot-log-cleared-' + log, String(maxId));
+      list.querySelectorAll('[data-id]').forEach(function (li) { li.remove(); });
+      updateEmptyState(log);
+      updateBadge(log);
+    });
+  });
+  ['output', 'errors', 'sent'].forEach(function (log) {
+    var threshold = parseInt(localStorage.getItem('glambot-log-cleared-' + log) || '0', 10);
+    var list = document.querySelector('[data-log-list="' + log + '"]');
+    if (list && threshold) {
+      list.querySelectorAll('[data-id]').forEach(function (li) {
+        if (parseInt(li.dataset.id, 10) <= threshold) li.remove();
       });
-    });
+    }
+    updateEmptyState(log);
+    updateBadge(log);
+  });
 
-    // Live progress polling for clips processing in the background.
-    (function () {
-      var section = document.getElementById('processingSection');
-      var list = document.getElementById('processingList');
-      var seen = new Set(Array.from(list.querySelectorAll('.proc-item')).map(function (el) { return el.dataset.job; }));
-      function poll() {
-        fetch('/status', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (jobs) {
-          if (!jobs.length) {
-            section.style.display = 'none';
-            // The whole batch finished → reload once to surface the new
-            // ready cards / logs / monitoring results.
-            if (seen.size) { seen = new Set(); location.reload(); return; }
-            return;
-          }
-          section.style.display = '';
-          list.innerHTML = jobs.map(function (j) {
-            return '<div class="proc-item" data-job="' + j.id + '">' +
-              '<div class="proc-label">' + j.project + ' / ' + j.filename +
-              '<span class="pct">' + j.progress + '%</span></div>' +
-              '<div class="bar"><span style="width:' + j.progress + '%"></span></div></div>';
-          }).join('');
-          seen = new Set(jobs.map(function (j) { return String(j.id); }));
-        }).catch(function () {});
-      }
-      setInterval(poll, 1000);
-      poll();
-    })();
-  </script>
+  // ---- Live progress polling for clips processing in the background. ----
+  (function () {
+    var section = document.getElementById('processingSection');
+    var list = document.getElementById('processingList');
+    var seen = new Set(Array.from(list.querySelectorAll('.proc-row')).map(function (el) { return el.dataset.job; }));
+    function poll() {
+      fetch('/status', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (jobs) {
+        if (!jobs.length) {
+          section.style.display = 'none';
+          // The whole batch finished → reload once to surface the new
+          // ready cards / logs / monitoring results.
+          if (seen.size) { seen = new Set(); location.reload(); return; }
+          return;
+        }
+        section.style.display = '';
+        list.innerHTML = jobs.map(function (j) {
+          var pct = j.progress;
+          return '<div class="proc-row" data-job="' + j.id + '">' +
+            '<div class="proc-top"><div class="proc-label">' + j.project + ' <span class="sub">/ ' + j.filename + '</span></div>' +
+            '<span class="pct-badge">' + pct + '%</span></div>' +
+            '<div class="clip-bar"><span style="width:' + pct + '%"></span></div>' +
+            '<div class="proc-bottom"><form method="post" action="/jobs/' + j.id + '/stop" class="proc-stop">' +
+            '<button type="submit" class="btn btn-ghost btn-sm">Stop</button></form></div></div>';
+        }).join('');
+        seen = new Set(jobs.map(function (j) { return String(j.id); }));
+      }).catch(function () {});
+    }
+    setInterval(poll, 1000);
+    poll();
+  })();
+</script>
 </body>
 </html>
