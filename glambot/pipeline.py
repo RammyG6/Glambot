@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from .app import create_app
 from .db import JobStore
+from .ftp_import import FtpImportServer, load_ftp_settings
 from .watcher import InboxWatcher
 
 
@@ -47,11 +48,18 @@ def main() -> None:
     watcher = InboxWatcher(inbox_dir, store)
     watcher.start()
 
-    app = create_app(inbox_dir, store, watcher)
+    ftp_server = FtpImportServer(inbox_dir, watcher)
+    if load_ftp_settings(inbox_dir).get("enabled"):
+        err = ftp_server.start()
+        if err:
+            logging.getLogger(__name__).warning("FTP import server not started: %s", err)
+
+    app = create_app(inbox_dir, store, watcher, ftp_server)
     try:
         app.run(host=bind_host, port=port, debug=False, use_reloader=False)
     finally:
         watcher.stop()
+        ftp_server.stop()
 
 
 def _warn_if_exposed_without_pin(bind_host: str) -> None:

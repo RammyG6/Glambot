@@ -117,6 +117,26 @@ e.g. `192.168.8.101`) — guests/iPad open `http://192.168.8.101:5000`.
 - Per-project guest downloads still need that project's own **download PIN**
   (set on the project form), separate from `GLAMBOT_PIN`.
 
+## Camera FTP auto-import (FX6 etc.)
+
+Glambot has a **built-in FTP server** — you no longer need to run FileZilla
+Server. Open the **FTP import** tab in the sidebar:
+
+1. Set the **Import folder** (default `D:\GlambotAuto_Import`) — click *Create it*
+   if it doesn't exist yet.
+2. Leave **Allow anonymous upload** ticked for a dedicated camera↔PC network, or
+   set a username/password.
+3. Click **Start**. Once running it auto-starts with Glambot on future launches.
+4. On the camera's FTP profile, enter the values shown in the **Camera setup**
+   card: this PC's IP, port **2121**, passive mode, upload directory `/`.
+5. In **Projects → Edit**, point that project's *footage source folder* at the
+   same Import folder. Uploaded clips are then processed automatically.
+
+The port (default 2121) avoids needing administrator rights. If Windows Firewall
+isn't allowing camera connections, the tab shows an **Apply firewall rule**
+button (and prompts on server start) — click it and confirm the one Windows
+permission dialog.
+
 ## Troubleshooting
 
 - **A window flashes and closes / "python not recognized":** Python isn't on PATH — reinstall

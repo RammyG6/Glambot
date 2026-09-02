@@ -35,6 +35,10 @@ for pkg in ("webview", "pystray", "googleapiclient", "google_auth_oauthlib", "go
 hiddenimports += [
     "watchdog.observers.read_directory_changes",
     "PIL._tkinter_finder",
+    "pyftpdlib",
+    "pyftpdlib.handlers",
+    "pyftpdlib.authorizers",
+    "pyftpdlib.servers",
 ]
 
 datas += [

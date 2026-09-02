@@ -72,10 +72,13 @@ Name: "{autodesktop}\Glambot"; Filename: "{app}\Glambot.exe"; Tasks: desktopicon
 ; control work over the LAN (BIND_HOST=0.0.0.0) without a manual Windows
 ; Defender Firewall prompt. Harmless when Glambot stays on loopback.
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Glambot LAN"" dir=in action=allow protocol=TCP localport=5000"; Flags: runhidden; StatusMsg: "Adding firewall rule for LAN access..."
+; Built-in camera FTP import: control port (default 2121) + passive data range.
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Glambot FTP import"" dir=in action=allow protocol=TCP localport=2121,50000-50050"; Flags: runhidden; StatusMsg: "Adding firewall rule for camera FTP import..."
 Filename: "{app}\Glambot.exe"; Description: "Launch Glambot now"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Glambot LAN"""; Flags: runhidden
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Glambot FTP import"""; Flags: runhidden
 
 ; Deliberately no [UninstallDelete] section: Inno's default uninstaller only
 ; removes what [Files]/[Dirs] installed under {app} (the app code). The data

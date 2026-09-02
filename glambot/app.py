@@ -39,6 +39,7 @@ from .delivery import DeliveryError, deliver
 from .drive import DriveError
 from .emailer import EmailError, load_default_template, resolve_placeholders, send_delivery_email
 from .folders import all_project_dirs, group_by_folder, project_watch_dirs
+from .ftp_import import load_ftp_settings, parse_passive_ports, save_ftp_settings
 from . import lan, nativeui
 from .processor import cancel_job, content_hash, is_footage_file
 from .qr import make_qr_data_uri, make_wifi_qr_data_uri
@@ -114,7 +115,7 @@ def _resolve_output_footage(project_dir: Path) -> Path | None:
         return None
 
 
-def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask:
+def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_server=None) -> Flask:
     app = Flask(
         __name__,
         template_folder=str(_REPO_ROOT / "templates"),
@@ -123,6 +124,7 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
     app.secret_key = _resolve_secret(Path(inbox_dir))
     app.config["INBOX_DIR"] = Path(inbox_dir)
     app.config["STORE"] = store
+    app.config["FTP_SERVER"] = ftp_server
 
     from .auth import init_auth
     init_auth(app)
@@ -434,6 +436,166 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         watcher.rescan_now()
         flash("Rescanned every project's watch folder.", "info")
         return redirect(url_for("index"))
+
+    # ---- FTP import: built-in FTP server for camera auto-import -------
+
+    def _ftp():
+        return app.config.get("FTP_SERVER")
+
+    @app.get("/ftp-import")
+    def ftp_import_page():
+        settings = load_ftp_settings(app.config["INBOX_DIR"])
+        server = _ftp()
+        if server is not None:
+            status = server.status()
+        else:
+            from .ftp_import import DEFAULT_USERNAME, firewall_command, firewall_rule_state
+            ports = parse_passive_ports(settings["passive_ports"]) or (50000, 50050)
+            connect_host = str(settings["passive_host"]).strip() or lan.lan_ip()
+            status = {
+                "running": False, "port": settings["port"], "root_dir": settings["root_dir"],
+                "lan_ip": lan.lan_ip(), "sessions": 0, "uploads_total": 0,
+                "anonymous": bool(settings["anonymous"]),
+                "username": str(settings["username"]).strip() or DEFAULT_USERNAME,
+                "passive_host": settings["passive_host"], "passive_ports": settings["passive_ports"],
+                "connect_host": connect_host,
+                "firewall_state": firewall_rule_state(int(settings["port"]), ports),
+                "firewall_command": firewall_command(int(settings["port"]), ports),
+                "clients": [], "uploads": [],
+            }
+        root_exists = bool(str(settings["root_dir"]).strip()) and Path(settings["root_dir"]).is_dir()
+        return render_template(
+            "ftp_import.html", settings=settings, status=status, root_exists=root_exists,
+            available=server is not None,
+        )
+
+    @app.get("/ftp-import/status.json")
+    def ftp_import_status():
+        server = _ftp()
+        if server is None:
+            resp = jsonify({"running": False, "available": False})
+        else:
+            resp = jsonify({"available": True, **server.status()})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.post("/ftp-import/settings")
+    def ftp_import_save():
+        inbox_dir = app.config["INBOX_DIR"]
+        form = request.form
+        root_dir = form.get("root_dir", "").strip().strip('"').strip("'")
+        if not root_dir:
+            flash("An import folder is required.", "error")
+            return redirect(url_for("ftp_import_page"))
+        try:
+            port = int(form.get("port", "2121"))
+        except ValueError:
+            flash("Port must be a number.", "error")
+            return redirect(url_for("ftp_import_page"))
+        if not (1 <= port <= 65535):
+            flash("Port must be between 1 and 65535.", "error")
+            return redirect(url_for("ftp_import_page"))
+        if parse_passive_ports(form.get("passive_ports", "")) is None:
+            flash("Passive port range must look like '50000-50050' (1024-65535, low < high).", "error")
+            return redirect(url_for("ftp_import_page"))
+        anonymous = form.get("anonymous") == "on"
+        # Blank username always resolves back to the default ("glambot"); the
+        # named account is always registered alongside anonymous access.
+        username = form.get("username", "").strip() or "glambot"
+        password = form.get("password", "")
+
+        settings = save_ftp_settings(inbox_dir, {
+            "port": port, "root_dir": root_dir, "anonymous": anonymous,
+            "username": username, "password": password,
+            "passive_host": form.get("passive_host", "").strip(),
+            "passive_ports": form.get("passive_ports", "").strip(),
+        })
+        server = _ftp()
+        if server is not None and server.running:
+            err = server.restart(settings)
+            flash(f"Saved, but restart failed: {err}" if err else "Saved and restarted the FTP server.",
+                  "error" if err else "info")
+        else:
+            flash("FTP import settings saved.", "info")
+        return redirect(url_for("ftp_import_page"))
+
+    @app.post("/ftp-import/root/create")
+    def ftp_import_create_root():
+        settings = load_ftp_settings(app.config["INBOX_DIR"])
+        try:
+            Path(settings["root_dir"]).mkdir(parents=True, exist_ok=True)
+            flash(f"Created {settings['root_dir']}.", "info")
+        except OSError as exc:
+            flash(f"Could not create that folder: {exc}", "error")
+        return redirect(url_for("ftp_import_page"))
+
+    @app.post("/ftp-import/start")
+    def ftp_import_start():
+        inbox_dir = app.config["INBOX_DIR"]
+        server = _ftp()
+        if server is None:
+            flash("The FTP server component isn't available in this build.", "error")
+            return redirect(url_for("ftp_import_page"))
+        settings = save_ftp_settings(inbox_dir, {"enabled": True})
+        err = server.start(settings)
+        if err:
+            save_ftp_settings(inbox_dir, {"enabled": False})
+            flash(f"Could not start: {err}", "error")
+        else:
+            flash("FTP import server started.", "info")
+        return redirect(url_for("ftp_import_page"))
+
+    @app.post("/ftp-import/stop")
+    def ftp_import_stop():
+        save_ftp_settings(app.config["INBOX_DIR"], {"enabled": False})
+        server = _ftp()
+        if server is not None:
+            server.stop()
+        flash("FTP import server stopped.", "info")
+        return redirect(url_for("ftp_import_page"))
+
+    @app.post("/ftp-import/firewall/apply")
+    def ftp_import_firewall_apply():
+        """Add/refresh the Windows Firewall rule for the FTP + passive ports.
+        Loopback-only: it raises a UAC prompt on the Glambot PC."""
+        if (request.remote_addr or "") not in {"127.0.0.1", "::1", "localhost"}:
+            flash("Firewall changes can only be made from the Glambot PC.", "error")
+            return redirect(url_for("ftp_import_page"))
+        server = _ftp()
+        if server is None:
+            flash("The FTP server component isn't available in this build.", "error")
+            return redirect(url_for("ftp_import_page"))
+        err = server.apply_firewall()
+        if err:
+            flash(err, "error")
+        elif server.refresh_firewall_state() == "ok":
+            flash("Windows Firewall rule applied.", "info")
+        else:
+            flash("Firewall rule not confirmed yet - it may take a moment, or was declined.", "error")
+        return redirect(url_for("ftp_import_page"))
+
+    @app.post("/ftp-import/open-folder")
+    def ftp_import_open_folder():
+        """Open the import folder in the OS file manager. Loopback-only, like /pick."""
+        if (request.remote_addr or "") not in {"127.0.0.1", "::1", "localhost"}:
+            flash("The folder can only be opened on the Glambot PC.", "error")
+            return redirect(url_for("ftp_import_page"))
+        root = Path(load_ftp_settings(app.config["INBOX_DIR"])["root_dir"])
+        if not root.is_dir():
+            flash(f"That folder doesn't exist: {root}", "error")
+            return redirect(url_for("ftp_import_page"))
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(root))  # noqa: S606 - local path from local settings
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.run(["open", str(root)], check=False)
+            else:
+                import subprocess
+                subprocess.run(["xdg-open", str(root)], check=False)
+        except OSError as exc:
+            flash(f"Could not open the folder: {exc}", "error")
+        return redirect(url_for("ftp_import_page"))
 
     @app.post("/pick")
     def pick():

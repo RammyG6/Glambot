@@ -91,6 +91,7 @@ def main() -> None:
 
     from glambot.app import create_app
     from glambot.db import JobStore
+    from glambot.ftp_import import FtpImportServer, load_ftp_settings
     from glambot.processor import stop_all_active
     from glambot.watcher import InboxWatcher
 
@@ -111,7 +112,14 @@ def main() -> None:
     store = JobStore(inbox_dir / ".glambot" / "jobs.sqlite")
     watcher = InboxWatcher(inbox_dir, store)
     watcher.start()
-    app = create_app(inbox_dir, store, watcher)
+
+    ftp_server = FtpImportServer(inbox_dir, watcher)
+    if load_ftp_settings(inbox_dir).get("enabled"):
+        err = ftp_server.start()
+        if err:
+            logging.warning("FTP import server not started: %s", err)
+
+    app = create_app(inbox_dir, store, watcher, ftp_server)
 
     server_thread = threading.Thread(
         target=lambda: app.run(host=bind_host, port=port, debug=False, use_reloader=False),
@@ -135,10 +143,10 @@ def main() -> None:
             f"Check the log for details:\n{log_path}"
         )
 
-    _run_gui(url, watcher, log_path)
+    _run_gui(url, watcher, log_path, ftp_server)
 
 
-def _run_gui(url: str, watcher, log_path: Path) -> None:
+def _run_gui(url: str, watcher, log_path: Path, ftp_server=None) -> None:
     import webview
     import pystray
     from PIL import Image
@@ -165,6 +173,11 @@ def _run_gui(url: str, watcher, log_path: Path) -> None:
             watcher.stop()
         except Exception:
             logging.exception("Error stopping watcher")
+        try:
+            if ftp_server is not None:
+                ftp_server.stop()
+        except Exception:
+            logging.exception("Error stopping FTP import server")
         try:
             tray_icon.stop()
         except Exception:
