@@ -8,9 +8,13 @@ soundtracks/
 *.sqlite
 *.sqlite3
 *.log
+.glambot/
 .env
 credentials.json
 token.json
+# Local FTP-server export — machine-specific, contains a user password hash
+FTP_FX6_Config.xml
+*_Config.xml
 
 # Python
 .venv/

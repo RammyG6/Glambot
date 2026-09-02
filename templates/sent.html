@@ -13,8 +13,13 @@
 </head>
 <body>
   <h1>Sent ✓</h1>
-  <p>{{ job.project }} / {{ job.filename }} was uploaded and emailed to the recipient.</p>
-  <p>Scan to open on another device:</p>
+  <p>{{ job.project }} / {{ job.filename }} was delivered to the recipient.</p>
+  {% if lan_link %}
+    <p>Guests download over Wi-Fi at{% if download_pin %} (PIN <strong>{{ download_pin }}</strong>){% endif %}:</p>
+    {% if wifi_qr_data_uri %}<img src="{{ wifi_qr_data_uri }}" alt="Join Wi-Fi QR" width="180" height="180"><p class="link">Join Wi-Fi, then scan below</p>{% endif %}
+  {% else %}
+    <p>Scan to open on another device:</p>
+  {% endif %}
   <img src="{{ qr_data_uri }}" alt="QR code for download link" width="220" height="220">
   <p class="link"><a href="{{ link }}" target="_blank">{{ link }}</a></p>
   {% if link2 %}

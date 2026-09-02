@@ -84,6 +84,39 @@ something goes wrong, so errors are never lost to a flashing window.
 pause-on-error; useful if you want to run it from a terminal instead of double-clicking, e.g.
 while debugging.)
 
+## Serving guests / an iPad over the LAN
+
+By default Glambot only listens on `127.0.0.1` (this PC). To let guest phones
+download clips, or to control Glambot from an iPad, you need a shared network
+and two `.env` changes.
+
+**Network** — either works, no internet required:
+- **A travel Wi-Fi router** — plug the Glambot PC in (Ethernet or Wi-Fi) and
+  have guests join the same router's SSID.
+- **Windows Mobile Hotspot** — Settings → Network & internet → Mobile hotspot.
+  The PC broadcasts its own Wi-Fi; guests join that. (~8 device limit, and it
+  can't run at the same time as the PC using Wi-Fi for internet.)
+
+**`.env`:**
+```
+BIND_HOST=0.0.0.0
+GLAMBOT_PIN=1234          # required once you're on the LAN - any 4+ chars
+LAN_SSID=YourEventWifi    # optional: adds a "Join Wi-Fi" QR to the kiosk/photo
+LAN_PASSWORD=...
+PUBLIC_BASE_URL=          # optional: force a URL, e.g. http://192.168.8.1:5000
+```
+
+Then restart Glambot. Find this PC's address with `ipconfig` (the IPv4 address,
+e.g. `192.168.8.101`) — guests/iPad open `http://192.168.8.101:5000`.
+
+- The **GlambotSetup.exe installer** adds a Windows Firewall rule for TCP 5000
+  automatically. If you run from source, Windows will prompt once to "allow"
+  Python through the firewall — click **Allow**.
+- The tray/desktop window keeps working with no PIN prompt — loopback requests
+  are always trusted.
+- Per-project guest downloads still need that project's own **download PIN**
+  (set on the project form), separate from `GLAMBOT_PIN`.
+
 ## Troubleshooting
 
 - **A window flashes and closes / "python not recognized":** Python isn't on PATH — reinstall

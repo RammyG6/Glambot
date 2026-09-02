@@ -96,7 +96,17 @@ def main() -> None:
 
     inbox_dir = Path(os.environ.get("INBOX_DIR", str(data_dir / "project"))).resolve()
     host = os.environ.get("HOST", "127.0.0.1")
+    # BIND_HOST is the listening socket; the window and readiness probe always
+    # use loopback (connecting to 0.0.0.0 is unreliable on Windows). Set
+    # BIND_HOST=0.0.0.0 in .env to also serve guests / iPads over the LAN.
+    bind_host = os.environ.get("BIND_HOST", host)
     port = int(os.environ.get("PORT", "5000"))
+
+    if bind_host not in {"127.0.0.1", "::1", "localhost"} and not os.environ.get("GLAMBOT_PIN", "").strip():
+        logging.warning(
+            "Glambot is binding to %s with no GLAMBOT_PIN set - the operator dashboard is "
+            "reachable by anyone on the LAN. Set GLAMBOT_PIN in .env.", bind_host,
+        )
 
     store = JobStore(inbox_dir / ".glambot" / "jobs.sqlite")
     watcher = InboxWatcher(inbox_dir, store)
@@ -104,12 +114,12 @@ def main() -> None:
     app = create_app(inbox_dir, store, watcher)
 
     server_thread = threading.Thread(
-        target=lambda: app.run(host=host, port=port, debug=False, use_reloader=False),
+        target=lambda: app.run(host=bind_host, port=port, debug=False, use_reloader=False),
         daemon=True,
     )
     server_thread.start()
 
-    url = f"http://{host}:{port}/"
+    url = f"http://127.0.0.1:{port}/"
     import urllib.request
     ready = False
     for _ in range(60):
@@ -134,6 +144,10 @@ def _run_gui(url: str, watcher, log_path: Path) -> None:
     from PIL import Image
 
     window = webview.create_window("Glambot", url, width=1400, height=900)
+
+    # Let the Flask "/pick" route raise native file dialogs on this window.
+    from glambot import nativeui
+    nativeui.register_webview_window(window)
 
     _shutting_down = threading.Event()
 

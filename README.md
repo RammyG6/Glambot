@@ -62,9 +62,11 @@ soundtracks/
   "aspect_ratio": "9:16",
   "second_resolution": "1920x1080",
   "second_bitrate": "8M",
-  "overlay": "overlays/brand.png",
-  "overlay_position": "full",
-  "overlay_scale": 20,
+  "vertical_overlay": "overlays/brand_9x16.png",
+  "vertical_overlay_position": "full",
+  "horizontal_overlay": "overlays/brand_16x9.png",
+  "horizontal_overlay_position": "bottom-right",
+  "horizontal_overlay_scale": 20,
   "fps": 30,
   "rotation": 0,
   "position_x": 0,
@@ -93,14 +95,22 @@ soundtracks/
 - `trim` is now fully **optional** — leave `start`/`end` blank or omit `trim`
   entirely to export the full clip untrimmed. It applies to every file in the
   project unless overridden per filename under `overrides`.
-- `overlay_position`: `full` (fills the frame), `top-left` / `top-right` /
-  `bottom-left` / `bottom-right` (fixed 20px margin), or `custom` (needs
-  `overlay_x` / `overlay_y`, 0–100, the overlay's top-left corner as a
-  percentage of frame width/height).
-- `overlay_scale` (optional, 1–100): resizes the overlay to that percentage of
-  the frame width, preserving its own aspect ratio, before placing it. Without
-  it, `full` fills the whole frame and corner positions use the overlay's
-  native pixel size.
+- `vertical_overlay` / `horizontal_overlay` (both optional): one overlay per
+  orientation. The renderer picks the one matching each output's shape
+  (`height > width` → vertical), so flipping a project's aspect ratio swaps the
+  overlay automatically, and a dual-resolution export uses each. A legacy
+  single `overlay` (or `second_overlay`) still works as a fallback and is
+  migrated to these keys the next time the project is saved from the form. The
+  form shows a **Vertical (9:16)** and a **Horizontal (16:9)** preview, plus a
+  **Remove this overlay** checkbox per orientation.
+- `vertical_overlay_position` / `horizontal_overlay_position`: `full` (fills the
+  frame), `top-left` / `top-right` / `bottom-left` / `bottom-right` (fixed 20px
+  margin), or `custom` (needs `..._overlay_x` / `..._overlay_y`, 0–100, the
+  overlay's top-left corner as a percentage of frame width/height).
+- `vertical_overlay_scale` / `horizontal_overlay_scale` (optional, 1–100):
+  resizes that overlay to that percentage of the frame width, preserving its
+  aspect ratio. Without it, `full` fills the frame and corner positions use the
+  overlay's native pixel size.
 - `fps` (optional): forces an output frame rate. Without it, the source's
   frame rate is kept.
 - `rotation` (optional, one of `0`, `90`, `-90`, `180`, default `0`): rotates
@@ -121,8 +131,24 @@ soundtracks/
 - `drive_folder_id` (optional): upload this project's clips to a specific
   Google Drive folder instead of the default one set by `DRIVE_FOLDER_ID` in
   `.env`. Accepts either the bare folder ID or its full share URL.
-- `overlay` path is relative to the repo root (e.g. put shared graphics in
+- overlay paths are relative to the repo root (e.g. put shared graphics in
   `overlays/`).
+- `auto_deliver` / `lan_delivery` / `offline_mode` (all optional booleans, at
+  most one true): the project's **Mode**. The New Project form presents these
+  as one exclusive radio — Standard / Fully automatic / Local Wi-Fi link /
+  Fully offline. `download_pin` (4–8 digits) is required for the Wi-Fi and
+  offline modes — see "Offline LAN delivery" below.
+- `grade` (optional, `{ "exposure": 0.0, "contrast": 1.0, "white_balance": 0 }`):
+  exposure in stops (-2..2), contrast (0.5..2), white balance (-100 warm ..
+  100 cool). Applied to every clip. See "Advanced editing".
+- `speed_ramp` (optional): retime the clip along a curve (fast/slow-motion
+  sections). `points` is `[{ "t": 0..1, "speed": 0.1..40, "hl": [dt,dv],
+  "hr": [dt,dv] }]` — `hl`/`hr` are optional bezier tangent handle offsets
+  (auto-flat when absent). See "Advanced editing". **Original audio is dropped
+  on ramped clips** — only the soundtrack (at normal speed) survives.
+- `overrides.<filename>` can also carry a per-clip `grade` or `speed_ramp`
+  (`{ "enabled": false }` to switch the project ramp off for one clip),
+  editable from the review card's **Advanced edit (this clip only)** panel.
 
 The **+ New Project** form on the review page generates this file for you —
 resolution/fps/bitrate come from dropdowns (with a Custom option for each),
@@ -147,8 +173,8 @@ the review screen before approving:
 
 ### Full automation
 
-Check **"Fully automatic delivery"** on the New Project form (or set
-`"auto_deliver": true` in `config.json`) to skip the manual Approve step
+Pick **"Fully automatic delivery"** in the New Project form's **Mode** section
+(or set `"auto_deliver": true` in `config.json`) to skip the manual Approve step
 entirely — as soon as a clip finishes processing, it uploads and delivers
 itself automatically, using the project's default recipient/email template
 (for `email` mode) or generating the kiosk QR photo straight away (for
@@ -191,9 +217,10 @@ clamps to the edge of the available frame.
 
 Check **"Also export a second resolution"** on the New Project form to
 produce two output files from the same source clip in one pass (e.g. a 9:16
-vertical cut and a 16:9 horizontal cut). Both stay on **one review card** —
-a single Approve click uploads and delivers both together: one email with
-both links (add `{link2}` to your subject/body template to place it
+vertical cut and a 16:9 horizontal cut). Each output automatically uses the
+overlay (vertical / horizontal) matching its own shape. Both stay on **one
+review card** — a single Approve click uploads and delivers both together: one
+email with both links (add `{link2}` to your subject/body template to place it
 precisely, otherwise it's appended automatically), or a kiosk screen showing
 two QR codes side by side.
 
@@ -207,6 +234,96 @@ balance the music against the clip's own audio — mix both, or push one all
 the way down to effectively mute it. `soundtrack_trim` optionally selects
 just a portion of a longer track. If the source clip has no audio track at
 all, the soundtrack plays alone automatically.
+
+The soundtrack section has a **Test trimmed section** button that plays the
+selected track between its trim in/out points, and — for a track already in
+the library — a **Delete from library** button (gated by
+`GLAMBOT_DELETE_PASSWORD`, and refused while any project still uses the track).
+
+### Email template
+
+The project form's **Email template** tab (always available, any mode) sets a
+subject + message Glambot uses for that project's emails — review-card prefill,
+auto-delivery, `/remote` email, and the "Email a delivered clip" re-send. Leave
+it blank to use the global default in `templates/email_default.txt`.
+Placeholders: `{link}`, `{link2}`, `{project}`, `{filename}`. Stored as
+`email_subject` / `email_body` in `config.json`.
+
+**Hide fields** collapses the editor; **Clear template** empties it (reverting
+that project to the global default on the next save). Saving the project form
+with template changes asks for a confirmation first.
+
+The same per-project template is also editable from the top of the **Email a
+delivered clip** page (`/clips`) — pick a project, edit, **Save template**.
+
+### Project form tabs
+
+The project form is split into tabs: **Basic** (project, mode, output, playback
+background) · **Overlay** (the two orientation overlays, with placement
+previews) · **Soundtrack** · **Advanced editing** · **Email template**. The
+last-used tab is remembered per browser.
+
+### Advanced editing
+
+- **Colour & exposure** — exposure / contrast / white-balance sliders, applied
+  to every clip the project renders (ffmpeg `eq` + `colortemperature`). Dragging
+  a slider **live-approximates** the change on the Render-preview video with a
+  CSS filter (caption "approximate"); the **Render preview** button bakes the
+  exact ffmpeg grade.
+- **Speed ramp** — a draggable curve (time on X, speed on Y, `0.1×`–`40×` on a
+  log scale). Drag the points; drag each point's **bezier tangent handles** to
+  shape the transition (flat / weighted by default); double-click the track to
+  add a point, double-click a point to remove it. "Smooth" = bezier through the
+  handles; "Linear" = straight segments. Realised by splitting the clip into
+  short segments, retiming each with `setpts`, and concatenating — so **ramped
+  renders are slower** than plain ones, and much slower with "Interpolate
+  frames" on. The original audio is dropped on a ramped clip; the soundtrack
+  (if any) plays at normal speed.
+- **Render preview** (edit mode only) — renders a few seconds of a real clip at
+  low resolution so you can check the settings before saving.
+
+Both settings are **project defaults**. On a review card, the **Advanced edit
+(this clip only)** panel overrides the grade for a single clip, or turns the
+project's speed ramp off for it, then re-renders that clip. A per-clip *custom
+curve* is done by editing the project.
+
+### Offline LAN delivery
+
+For events with poor or no internet, guests can download their clip straight
+from the Glambot PC over Wi-Fi (a small travel router, or the PC's own Mobile
+Hotspot). On the project form:
+
+- **Offer a local Wi-Fi download link** (`lan_delivery`) — adds a guest
+  download page alongside the normal Google Drive delivery. The QR points at
+  `http://<this-pc-lan-ip>:<port>/d/<token>`.
+- **Fully offline — skip Google Drive entirely** (`offline_mode`) — no upload
+  at all; the Wi-Fi link is the only delivery.
+- **Guest download PIN** (`download_pin`, 4–8 digits) — guests type this before
+  downloading. Print it on the QR card. Required for either option above.
+
+Guests get a per-clip page (`/d/<token>`) and an event gallery
+(`/g/<project>`), both behind the PIN. If `LAN_SSID` / `LAN_PASSWORD` are set
+in `.env`, the kiosk screen and delivery photo also show a **"Join Wi-Fi" QR**
+next to the download QR. (A single QR can carry a Wi-Fi-join string *or* a URL,
+never both, and a web page cannot control the phone's Wi-Fi — so "join, then
+download" is two QR codes, not one.)
+
+To serve guests you must set `BIND_HOST=0.0.0.0` and `GLAMBOT_PIN` in `.env` —
+see WINDOWS_SETUP.md.
+
+### Control from an iPad
+
+With `BIND_HOST=0.0.0.0` and `GLAMBOT_PIN` set, open
+`http://<pc-lan-ip>:<port>/` in Safari on an iPad, enter the PIN, and use the
+full dashboard. **Share → Add to Home Screen** installs it as an app icon.
+There's also a stripped touch page at **`/remote`**: thumbnails for every clip;
+approve / approve-by-email / reject the ready clips; rescan; per project, pin
+which clip the kiosk shows, pause/resume playback, re-email the selected
+delivered clip, or delete it (record + rendered files, gated by
+`GLAMBOT_DELETE_PASSWORD`).
+
+Requests from the Glambot PC itself (`127.0.0.1`, including the packaged
+window) never see the PIN prompt.
 
 ### Custom footage source folder
 
@@ -241,6 +358,12 @@ the end of it), and paste it in. Leave it blank to keep using the default.
 ```bash
 cp .env.example .env   # then fill in the values below
 ```
+
+New `.env` keys beyond Drive/SMTP: `BIND_HOST` (set `0.0.0.0` to serve the
+LAN), `GLAMBOT_PIN` (operator PIN required from any non-loopback device),
+`FLASK_SECRET` (blank = auto-managed), `PUBLIC_BASE_URL` / `LAN_SSID` /
+`LAN_PASSWORD` (LAN guest delivery). All optional — leave them blank for the
+original local-only behaviour.
 
 Recognized footage extensions: `.mp4`, `.mov`, `.m4v`, `.avi`, `.mkv`, `.webm`,
 `.mxf` (Sony), `.cine` (Phantom high-speed), `.braw` (Blackmagic RAW). Stock
@@ -353,8 +476,8 @@ cat > inbox/demo/config.json <<'EOF'
   "bitrate": "3M",
   "resolution": "720x1280",
   "aspect_ratio": "9:16",
-  "overlay": "overlays/brand.png",
-  "overlay_position": "bottom-right",
+  "vertical_overlay": "overlays/brand.png",
+  "vertical_overlay_position": "bottom-right",
   "trim": { "start": "00:00:02", "end": "00:00:12" }
 }
 EOF
@@ -373,15 +496,21 @@ Then run `./run.sh` and watch `inbox/demo/Footage/` appear.
   that's been processed/edited regardless of delivery mode, and the **email
   sent log** lists only clips delivered via email mode (with recipient +
   Drive link).
-- The monitoring page (`/projects/<name>/kiosk`) shows **all** of a project's
+- The monitoring page (`/projects/<name>/kiosk`) shows a project's
   delivered clips as a newest-first grid of thumbnail + QR code(s), refreshing
-  itself every few seconds — a "wall of scan-your-clip" for a venue. Each
-  tile has a small **hide** button (upper-right corner) to pull an individual
-  clip off the screen without deleting it — hidden clips are reversible from
-  `/projects/<name>/kiosk/hidden` (linked from the kiosk page), which lists
-  them with an **Unhide** button to bring one back.
+  itself every few seconds — a "wall of scan-your-clip" for a venue. It shows
+  the newest 8; a **Load more clips** button below the grid pulls in earlier
+  ones (same layout). Each tile has a small **hide** button (upper-right
+  corner) to pull an individual clip off the screen without deleting it —
+  hidden clips are reversible from `/projects/<name>/kiosk/hidden` (linked from
+  the kiosk page), which lists them with an **Unhide** button.
 - Invalid or missing `config.json` → the clip won't process; the error shows
   up in the review app's **Errors** section once a footage file has landed.
+- A referenced **asset file that's gone missing** (overlay, soundtrack,
+  playback background) no longer blocks the project — it loads and renders
+  *without* that asset, logs a warning, and shows a banner on the review card
+  and the edit form listing exactly what's missing. Re-upload it, or tick
+  **Remove this overlay** on the form.
 - Failed Drive upload or email send on Approve → the job **stays in the
   review queue** (not moved to Errors) with the failure message shown inline
   on its card, and the file is **not** moved/archived, so you can fix

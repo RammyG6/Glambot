@@ -58,13 +58,22 @@
       var clips = [];
       var currentIndex = 0;
       var lastKnownNewestId = null;
+      var paused = false;
 
       function loadClips(cb) {
         fetch('/projects/{{ project|urlencode }}/playback.json', { cache: 'no-store' })
           .then(function (r) { return r.json(); })
-          .then(function (data) { clips = data.clips || []; cb && cb(); })
+          .then(function (data) { clips = data.clips || []; paused = !!data.paused; cb && cb(); })
           .catch(function () {});
       }
+
+      // Honour the operator's Pause/Resume from the /remote page.
+      setInterval(function () {
+        loadClips(function () {
+          if (paused && !video.paused) { video.pause(); }
+          else if (!paused && video.paused && clips.length) { video.play().catch(function () {}); }
+        });
+      }, 4000);
 
       function playIndex(i) {
         if (!clips.length) {
@@ -87,6 +96,7 @@
       // after the oldest.
       video.addEventListener('ended', function () {
         loadClips(function () {
+          if (paused) { return; }
           if (!clips.length) { playIndex(0); return; }
           if (clips[0].id !== lastKnownNewestId) {
             playIndex(0);

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Event videos</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  body { max-width: 720px; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; }
+  h1 { font-size: 1.3rem; }
+  .pin-input { width: 100%; text-align: center; letter-spacing: .3em; font-size: 1.2rem; }
+  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 1rem; margin-top: 1rem; }
+  .gallery a { display: block; text-decoration: none; color: inherit; }
+  .gallery img { width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 12px; background: #111; display: block; }
+  .gallery .name { font-size: .85rem; margin-top: .35rem; word-break: break-word; }
+  .muted { color: var(--text-secondary); font-size: .9rem; }
+</style>
+</head>
+<body>
+{% if locked %}
+  <h1>Enter the PIN</h1>
+  <p class="muted">It's printed on the card with the QR code.</p>
+  {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+  <form method="post" action="{{ url_for('guest.gallery', project=project) }}">
+    <input class="pin-input" type="password" name="pin" inputmode="numeric" autocomplete="off" autofocus required>
+    <button type="submit" class="btn btn-primary" style="width:100%;margin-top:1rem">Unlock</button>
+  </form>
+{% else %}
+  <h1>Event videos</h1>
+  {% if not clips %}
+    <p class="muted">No videos yet - check back in a bit.</p>
+  {% else %}
+    <div class="gallery">
+      {% for job in clips %}
+        <a href="{{ url_for('guest.download_page', token=job.download_token) }}">
+          <img src="{{ url_for('guest.gallery_thumb', project=project, job_id=job.id) }}" alt="{{ job.filename }}" loading="lazy">
+          <div class="name">{{ job.filename }}</div>
+        </a>
+      {% endfor %}
+    </div>
+  {% endif %}
+{% endif %}
+</body>
+</html>

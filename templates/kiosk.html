@@ -29,10 +29,18 @@
   <img class="thumb" src="{{ url_for('thumbnail', job_id=job.id) }}" alt="Your clip"
        onerror="this.style.display='none'">
   <h1>Scan to download your video</h1>
+  {% if download_pin %}<p class="sub">Download PIN: <strong>{{ download_pin }}</strong></p>{% endif %}
   <div class="qr-row">
+    {% if wifi_qr_data_uri %}
+    <div class="qr-wrap">
+      <img src="{{ wifi_qr_data_uri }}" alt="Join Wi-Fi QR" width="280" height="280">
+      <div class="qr-label">1. Join Wi-Fi</div>
+    </div>
+    {% endif %}
     <div class="qr-wrap">
       <img src="{{ qr_data_uri }}" alt="QR code" width="280" height="280">
-      {% if link2 %}<div class="qr-label">Version 1</div>{% endif %}
+      {% if wifi_qr_data_uri %}<div class="qr-label">2. Scan to download</div>
+      {% elif link2 %}<div class="qr-label">Version 1</div>{% endif %}
     </div>
     {% if link2 %}
     <div class="qr-wrap">

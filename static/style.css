@@ -486,3 +486,25 @@ code {
 .log-row:last-child { border-bottom: none; }
 .log-what { font-weight: 600; color: var(--text); }
 .log-why { color: #ff8a80; margin-top: .2rem; font-size: .8rem; }
+
+/* ---------- Advanced editor: reset controls ---------- */
+.adv-reset {
+  background: none; border: none; padding: 0 0 0 .5rem; margin: 0;
+  color: var(--text-secondary, #8e8e93); font: inherit; font-size: .72rem;
+  cursor: pointer; text-decoration: underline; vertical-align: middle;
+}
+.adv-reset:hover { color: var(--text, #fff); }
+.adv-ramp-curve-actions { margin: .35rem 0 .1rem; }
+.adv-ramp-maxspeed-custom { display: block; margin-top: .45rem; }
+.adv-ramp-maxspeed-custom.hidden { display: none; }
+.adv-ramp-maxspeed-custom input { width: 6rem; }
+.adv-reset-all {
+  display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1rem;
+  padding-top: .75rem; border-top: 1px solid var(--border);
+}
+.adv-reset-all button {
+  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm, 6px);
+  color: var(--text-secondary, #8e8e93); font: inherit; font-size: .78rem;
+  padding: .35rem .7rem; cursor: pointer;
+}
+.adv-reset-all button:hover { color: var(--text, #fff); border-color: var(--text-secondary, #8e8e93); }

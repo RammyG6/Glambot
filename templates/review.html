@@ -1,8 +1,14 @@
+{% from "_advanced_editor.html" import advanced_editor %}
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>Glambot Automation</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
   body { max-width: none; padding: 0; margin: 0; }
@@ -11,6 +17,26 @@
   @keyframes slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
   .video-frame { border-radius: 14px; overflow: hidden; margin-bottom: 1.25rem; background: #000; }
   .video-frame video { width: 100%; max-height: 380px; display: block; }
+  .adv-edit { margin: -0.5rem 0 1.25rem; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .5rem .9rem; }
+  .adv-edit summary { cursor: pointer; font-weight: 600; font-size: .85rem; color: var(--text-secondary); }
+  .adv-edit .adv-form { margin-top: .75rem; display: flex; flex-direction: column; gap: .5rem; }
+  .adv-edit label { font-size: .82rem; }
+  .adv-edit input[type=range] { width: 100%; }
+  .adv-actions { display: flex; gap: .6rem; margin-top: .3rem; flex-wrap: wrap; }
+  .adv-preview-video { width: 100%; max-width: 420px; border-radius: 10px; background: #000; margin-top: .5rem; }
+  .adv-editor { display: flex; flex-direction: column; gap: .5rem; }
+  .adv-editor .adv-grade { display: flex; flex-direction: column; gap: .4rem; }
+  .adv-editor label { font-size: .82rem; }
+  .adv-editor input[type=range] { width: 100%; }
+  .adv-editor .adv-val { font-weight: 600; color: var(--accent); }
+  .adv-ramp-details { border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: .4rem .7rem; }
+  .adv-ramp-details summary { cursor: pointer; font-size: .82rem; font-weight: 600; color: var(--text-secondary); }
+  .adv-ramp-editor .row { display: flex; gap: .8rem; flex-wrap: wrap; }
+  .adv-ramp-editor .row > div { flex: 1 1 130px; }
+  .sent-tool { margin-top: .6rem; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .4rem .8rem; }
+  .sent-tool > summary { cursor: pointer; font-weight: 600; font-size: .82rem; color: var(--text-secondary); }
+  .sent-email-form { display: flex; flex-direction: column; gap: .5rem; margin-top: .6rem; }
+  .sent-email-form textarea { min-height: 5rem; width: 100%; }
   @media (max-width: 900px) {
     .sidebar { position: static; height: auto; width: 100% !important; }
     .app-shell { flex-direction: column; }
@@ -49,6 +75,10 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6l9 6 9-6"/><rect x="3" y="5" width="18" height="14" rx="2"/></svg>
             Email a delivered clip
           </a>
+          <a href="{{ url_for('remote') }}" target="_blank" rel="noopener" class="btn btn-secondary btn-sm">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
+            Touch remote
+          </a>
           <form method="post" action="{{ url_for('rescan') }}" style="display:inline">
             <button type="submit" class="btn btn-ghost btn-sm">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 1 2.6 6.3M3 12V6m0 6h6"/></svg>
@@ -69,19 +99,35 @@
           </div>
           <div class="panel">
             {% for po in project_orientations %}
-              <div class="proc-row" style="display:flex;align-items:center;justify-content:space-between;gap:1rem">
+              <div class="proc-row" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
                 <div class="proc-label">{{ po.name }}</div>
-                <form method="post" action="{{ url_for('toggle_orientation', project=po.name) }}" style="display:inline">
-                  <button type="submit" class="btn btn-secondary btn-sm">
-                    {% if po.is_vertical %}
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="8" width="16" height="8" rx="1.5"/></svg>
-                      Switch to Horizontal
-                    {% else %}
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="4" width="8" height="16" rx="1.5"/></svg>
-                      Switch to Vertical
-                    {% endif %}
-                  </button>
-                </form>
+                <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+                  {% if po.mode_togglable %}
+                    <form method="post" action="{{ url_for('toggle_delivery_mode', project=po.name) }}" style="display:inline">
+                      <button type="submit" class="btn btn-secondary btn-sm"
+                              title="Applies to this project's next-processed footage only">
+                        {% if po.is_auto %}
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                          Switch to Manual approval
+                        {% else %}
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+                          Switch to Auto delivery
+                        {% endif %}
+                      </button>
+                    </form>
+                  {% endif %}
+                  <form method="post" action="{{ url_for('toggle_orientation', project=po.name) }}" style="display:inline">
+                    <button type="submit" class="btn btn-secondary btn-sm">
+                      {% if po.is_vertical %}
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="8" width="16" height="8" rx="1.5"/></svg>
+                        Switch to Horizontal
+                      {% else %}
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="4" width="8" height="16" rx="1.5"/></svg>
+                        Switch to Vertical
+                      {% endif %}
+                    </button>
+                  </form>
+                </div>
               </div>
             {% endfor %}
           </div>
@@ -219,6 +265,11 @@
               {% if card.config_error %}
                 <div class="flash error">Config problem: {{ card.config_error }}</div>
               {% endif %}
+              {% if card.missing_assets %}
+                <div class="flash error">Missing file(s), rendered without them:
+                  {% for w in card.missing_assets %}<code>{{ w }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+                </div>
+              {% endif %}
               {% if job.error %}
                 <div class="flash error">Last attempt failed: {{ job.error }}</div>
               {% endif %}
@@ -228,6 +279,21 @@
                   <source src="{{ url_for('video', job_id=job.id) }}" type="video/mp4">
                 </video>
               </div>
+
+              <details class="adv-edit">
+                <summary>Advanced edit (this clip only)</summary>
+                <form method="post" action="{{ url_for('override_job', job_id=job.id) }}" class="adv-form" data-job="{{ job.id }}">
+                  {{ advanced_editor(card.adv_values, 'clip') }}
+                  <div class="adv-actions">
+                    <button type="button" class="btn btn-secondary btn-sm adv-preview-btn">Render preview</button>
+                    <button type="submit" class="btn btn-primary btn-sm">Save &amp; re-render</button>
+                    <button type="submit" class="btn btn-secondary btn-sm adv-to-project-btn"
+                            formaction="{{ url_for('advanced_to_project', job_id=job.id) }}">Save as project default</button>
+                  </div>
+                  <video class="adv-preview-video hidden" controls playsinline></video>
+                  <p class="adv-status hint"></p>
+                </form>
+              </details>
 
               <form method="post" action="{{ url_for('approve', job_id=job.id) }}" class="approve-form">
                 <div class="field">
@@ -239,6 +305,7 @@
                 </div>
 
                 <div class="email-fields">
+                  <p class="field-hint" style="margin:.2rem 0 .6rem">Email template — placeholders <code>{{ '{link}' }}</code>, <code>{{ '{link2}' }}</code>, <code>{{ '{project}' }}</code>, <code>{{ '{filename}' }}</code>. Pre-filled from this project's template; edit for this send only.</p>
                   <div class="field">
                     <label for="recipient-{{ job.id }}">Recipient email</label>
                     <input type="email" id="recipient-{{ job.id }}" name="recipient_email"
@@ -324,14 +391,40 @@
                     </a>
                   {% endif %}
                 </div>
-                {% if job.delivery_mode == 'qr_only' and job.drive_link %}
-                  <div class="clip-actions">
-                    <span class="spacer"></span>
-                    <a href="{{ url_for('edited_clips') }}" class="btn btn-secondary btn-sm">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6l9 6 9-6"/><rect x="3" y="5" width="18" height="14" rx="2"/></svg>
-                      Send email
-                    </a>
-                  </div>
+                {% if job.drive_link %}
+                  <details class="sent-tool">
+                    <summary>Re-email this clip</summary>
+                    <form method="post" action="{{ url_for('email_clip', job_id=job.id) }}" class="sent-email-form">
+                      <div class="field">
+                        <label for="re-recipient-{{ job.id }}">Recipient email</label>
+                        <input type="email" id="re-recipient-{{ job.id }}" name="recipient_email" value="{{ sc.recipient_default }}">
+                      </div>
+                      <div class="field">
+                        <label for="re-subject-{{ job.id }}">Subject</label>
+                        <input type="text" id="re-subject-{{ job.id }}" name="subject" value="{{ sc.subject_default }}">
+                      </div>
+                      <div class="field">
+                        <label for="re-body-{{ job.id }}">Message</label>
+                        <textarea id="re-body-{{ job.id }}" name="body">{{ sc.body_default }}</textarea>
+                      </div>
+                      <button type="submit" class="btn btn-primary btn-sm">Send email</button>
+                    </form>
+                  </details>
+                  <details class="sent-tool adv-edit">
+                    <summary>Re-render with new edit</summary>
+                    <p class="hint">Re-rendering sends this clip back to <strong>Ready for Review</strong> — the current delivered link stays live until you re-approve.</p>
+                    <form method="post" action="{{ url_for('override_job', job_id=job.id) }}" class="adv-form" data-job="{{ job.id }}">
+                      {{ advanced_editor(sc.adv_values, 'clip') }}
+                      <div class="adv-actions">
+                        <button type="button" class="btn btn-secondary btn-sm adv-preview-btn">Render preview</button>
+                        <button type="submit" class="btn btn-primary btn-sm">Save &amp; re-render</button>
+                        <button type="submit" class="btn btn-secondary btn-sm adv-to-project-btn"
+                                formaction="{{ url_for('advanced_to_project', job_id=job.id) }}">Save as project default</button>
+                      </div>
+                      <video class="adv-preview-video hidden" controls playsinline></video>
+                      <p class="adv-status hint"></p>
+                    </form>
+                  </details>
                 {% endif %}
               </div>
             </div>
@@ -392,6 +485,9 @@
                       <a href="{{ url_for('playback_reel', project=p) }}" target="_blank" rel="noopener">
                         Playback reel <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg>
                       </a>
+                      {% if pg.guest_pins.get(p) %}
+                        <a href="{{ url_for('guest.gallery', project=p) }}" target="_blank" rel="noopener">Guest gallery (PIN {{ pg.guest_pins[p] }})</a>
+                      {% endif %}
                       <a href="{{ url_for('edit_project_form', project=p) }}" target="_blank" rel="noopener">Edit settings</a>
                       <a href="{{ url_for('import_footage_form', project=p) }}" target="_blank" rel="noopener">Import existing footage</a>
                       <a href="{{ url_for('clear_history', project=p) }}" target="_blank" rel="noopener">Clear history</a>
@@ -464,6 +560,7 @@
   </div>
 </div>
 
+<script src="{{ url_for('static', filename='advanced_edit.js') }}"></script>
 <script>
   // ---- Tab switching (sidebar nav <-> .tab-panel), remembered per-browser. ----
   (function () {
@@ -497,6 +594,30 @@
       render(collapsed);
     });
   })();
+
+  // ---- Advanced per-clip edit (shared component: static/advanced_edit.js) ----
+  document.querySelectorAll('.adv-form').forEach(function (form) {
+    var root = form.querySelector('[data-adv-root]');
+    if (!root || !window.GlambotAdvancedEditor) return;
+    window.GlambotAdvancedEditor(root, {
+      preview: {
+        btn: form.querySelector('.adv-preview-btn'),
+        video: form.querySelector('.adv-preview-video'),
+        status: form.querySelector('.adv-status'),
+        form: form,
+        url: '/jobs/' + form.dataset.job + '/preview',
+      },
+    });
+    var toProject = form.querySelector('.adv-to-project-btn');
+    if (toProject) {
+      toProject.addEventListener('click', function (ev) {
+        if (!confirm('Make these the Advanced settings for the whole project? '
+                     + 'Clips already rendered keep their look until re-rendered.')) {
+          ev.preventDefault();
+        }
+      });
+    }
+  });
 
   // ---- Delivery-mode select toggles the email-only fields. ----
   document.querySelectorAll('.approve-form').forEach(function (form) {

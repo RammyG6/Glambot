@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glambot Remote</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/180.png">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  body { max-width: 640px; margin: 0 auto; padding: 1rem 1rem 4rem; }
+  @media (min-width: 860px) { body { max-width: 1080px; } }
+  h1 { font-size: 1.3rem; }
+  h2 { font-size: 1rem; color: var(--text-secondary); margin: 1.75rem 0 .6rem; }
+  .r-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; margin-bottom: .9rem; }
+  .r-card .who { font-size: .85rem; color: var(--text-secondary); }
+  .r-card .what { font-weight: 600; margin: .1rem 0 .8rem; word-break: break-word; }
+  .r-thumb { width: 100%; max-height: 130px; object-fit: cover; border-radius: 10px; background: #111; display: block; margin-bottom: .7rem; }
+  .r-actions { display: flex; gap: .6rem; flex-wrap: wrap; }
+  .r-actions .btn { flex: 1 1 40%; justify-content: center; font-size: 1rem; padding: .85rem; }
+  .r-inline { display: none; margin-top: .6rem; gap: .5rem; }
+  .r-inline.open { display: flex; flex-wrap: wrap; }
+  .r-inline input { flex: 1 1 100%; font-size: 1rem; padding: .6rem; }
+  .r-inline .btn { flex: 1; justify-content: center; }
+  .r-controls .btn { width: 100%; justify-content: center; font-size: 1rem; padding: .85rem; margin-bottom: .6rem; }
+  .r-proj { border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; margin-bottom: .9rem; }
+  .r-proj select { width: 100%; font-size: 1rem; padding: .6rem; margin: .5rem 0; }
+  .r-proj .row { display: flex; gap: .6rem; }
+  .r-proj .row .btn { flex: 1; justify-content: center; }
+  .r-proj-body { display: flex; gap: 1.2rem; flex-wrap: wrap; align-items: flex-start; margin-top: .7rem; }
+  .r-proj-controls { flex: 1 1 240px; min-width: 0; }
+  .r-gallery { flex: 2 1 340px; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; background: var(--bg-elevated, transparent); }
+  .r-gallery h3 { font-size: .9rem; color: var(--text-secondary); margin: 0 0 .7rem; font-weight: 600; }
+  .r-gallery-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: .8rem; }
+  @media (max-width: 520px) { .r-gallery-grid { grid-template-columns: 1fr; } }
+  .r-gallery-grid .tile { border: 1px solid var(--border); border-radius: var(--radius-sm, 8px); padding: .5rem; cursor: pointer; text-align: center; background: none; }
+  .r-gallery-grid .tile.selected { border-color: var(--accent, #6ea8fe); background: rgba(110,168,254,0.12); }
+  .r-gallery-grid img { width: 100%; height: auto; aspect-ratio: 16 / 10; object-fit: cover; border-radius: 6px; background: #111; display: block; }
+  .r-gallery-grid .name { font-size: .8rem; color: var(--text-secondary); margin-top: .4rem; word-break: break-word; }
+  .r-gallery-more { width: 100%; margin-top: .8rem; }
+  .empty { color: var(--text-secondary); }
+  .toast { position: fixed; left: 50%; bottom: 1.25rem; transform: translateX(-50%); background: var(--bg-elevated-2, #222); border: 1px solid var(--border); padding: .6rem 1rem; border-radius: 999px; font-size: .9rem; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <h1>Glambot Remote</h1>
+
+  <h2>Ready for review</h2>
+  <div id="ready"><p class="empty">Loading&hellip;</p></div>
+
+  <h2>Controls</h2>
+  <div class="r-controls">
+    <button type="button" class="btn btn-secondary" data-act="rescan">Rescan watch folders</button>
+  </div>
+  <div id="projects"></div>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  var readyEl = document.getElementById('ready');
+  var projectsEl = document.getElementById('projects');
+  var toast = document.getElementById('toast');
+  var toastTimer = null;
+
+  function note(msg) {
+    toast.textContent = msg;
+    toast.classList.add('show');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toast.classList.remove('show'); }, 2200);
+  }
+
+  function post(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body || '',
+    });
+  }
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+  function thumb(id) { return '<img class="r-thumb" src="/thumbnail/' + id + '" onerror="this.style.display=\'none\'">'; }
+
+  var galleryCount = 8;
+
+  function galleryTile(c, selected) {
+    return '<button type="button" class="tile' + (selected ? ' selected' : '') + '" data-gallery-pick="' + c.id + '">' +
+      (c.thumb ? '<img src="/thumbnail/' + c.id + '" onerror="this.style.display=\'none\'">' : '') +
+      '<div class="name">' + esc(c.filename) + '</div></button>';
+  }
+
+  function render(data) {
+    var ready = data.ready || [];
+    readyEl.innerHTML = ready.length ? ready.map(function (j) {
+      return '<div class="r-card" data-id="' + j.id + '">' +
+        (j.thumb ? thumb(j.id) : '') +
+        '<div class="who">' + esc(j.project) + '</div>' +
+        '<div class="what">' + esc(j.filename) + '</div>' +
+        '<div class="r-actions">' +
+        '<button type="button" class="btn btn-primary" data-approve="' + j.id + '">Approve &amp; send</button>' +
+        '<button type="button" class="btn btn-secondary" data-email-toggle>Email…</button>' +
+        '<button type="button" class="btn btn-danger-ghost" data-reject="' + j.id + '">Reject</button>' +
+        '</div>' +
+        '<div class="r-inline" data-email-row>' +
+        '<input type="email" placeholder="recipient@example.com" value="' + esc(j.recipient_default || '') + '">' +
+        '<button type="button" class="btn btn-primary" data-email-send="' + j.id + '" data-kind="approve">Send by email</button>' +
+        '</div></div>';
+    }).join('') : '<p class="empty">Nothing waiting.</p>';
+
+    projectsEl.innerHTML = (data.projects || []).map(function (p) {
+      var opts = p.clips.map(function (c) {
+        var sel = c.id === p.live_job_id ? ' selected' : '';
+        return '<option value="' + c.id + '"' + sel + ' data-recipient="' + esc(c.recipient_default || '') +
+          '" data-thumb="' + (c.thumb ? '1' : '') + '">' + esc(c.filename) + '</option>';
+      }).join('');
+      var first = p.clips[0];
+      var selectedId = p.live_job_id || (first ? first.id : null);
+      return '<div class="r-proj" data-project="' + esc(p.project) + '">' +
+        '<strong>' + esc(p.project) + '</strong>' +
+        '<div class="r-proj-body">' +
+        '<div class="r-proj-controls">' +
+        '<select data-live>' + '<option value="">Auto (newest)</option>' + opts + '</select>' +
+        '<div class="row">' +
+        '<button type="button" class="btn btn-secondary" data-pause>' + (p.paused ? 'Resume playback' : 'Pause playback') + '</button>' +
+        '</div>' +
+        '<div data-clip-tools style="margin-top:.7rem">' +
+        (first && first.thumb ? thumb(first.id) : '') +
+        '<div class="r-actions">' +
+        '<button type="button" class="btn btn-secondary" data-clip-email-toggle>Email this clip…</button>' +
+        '<button type="button" class="btn btn-danger-ghost" data-clip-hide>Hide this clip</button>' +
+        '</div>' +
+        '<div class="r-inline" data-clip-email-row>' +
+        '<input type="email" placeholder="recipient@example.com" value="' + esc(first ? (first.recipient_default || '') : '') + '">' +
+        '<button type="button" class="btn btn-primary" data-clip-email-send>Send by email</button>' +
+        '</div>' +
+        '</div></div>' +
+        '<div class="r-gallery">' +
+        '<h3>Latest clips</h3>' +
+        '<div class="r-gallery-grid" data-gallery>' +
+        p.clips.map(function (c) { return galleryTile(c, c.id === selectedId); }).join('') +
+        '</div>' +
+        (p.has_more ? '<button type="button" class="btn btn-secondary r-gallery-more" data-gallery-more>Load more clips</button>' : '') +
+        '</div>' +
+        '</div></div>';
+    }).join('');
+  }
+
+  function selectedClipId(proj) {
+    var sel = proj.querySelector('[data-live]');
+    return sel.value || (sel.options[1] ? sel.options[1].value : '');  // fall back to newest
+  }
+
+  function refresh() {
+    // Don't clobber a half-typed recipient / password.
+    if (document.querySelector('.r-inline.open')) return;
+    fetch('/remote.json?count=' + galleryCount, { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        render(data);
+        Array.prototype.forEach.call(document.querySelectorAll('.r-proj'), syncClipTools);
+      })
+      .catch(function () {});
+  }
+
+  // Reflect the picked clip on the select into the clip-tools thumbnail and
+  // the gallery's highlighted tile - shared by the change handler below and
+  // by the initial render (so "Auto (newest)" / the pinned live clip starts
+  // in sync too).
+  function syncClipTools(proj) {
+    var sel = proj.querySelector('[data-live]');
+    // "Auto (newest)" has no thumb data of its own - fall back to the
+    // actual newest-clip option (options[1]) for both the id and the thumb.
+    var opt = sel.value ? sel.selectedOptions[0] : sel.options[1];
+    var id = opt ? opt.value : '';
+    var hasThumb = opt && opt.dataset.thumb === '1';
+    var tools = proj.querySelector('[data-clip-tools]');
+    var img = tools.querySelector('.r-thumb');
+    if (id && hasThumb) {
+      if (!img) { img = document.createElement('img'); img.className = 'r-thumb'; tools.insertBefore(img, tools.firstChild); }
+      img.src = '/thumbnail/' + id;
+      img.onerror = function () { img.style.display = 'none'; };
+      img.style.display = '';
+    } else if (img) {
+      img.remove();
+    }
+    var gallery = proj.querySelector('[data-gallery]');
+    if (gallery) {
+      Array.prototype.forEach.call(gallery.querySelectorAll('.tile'), function (tile) {
+        tile.classList.toggle('selected', tile.dataset.galleryPick === String(id));
+      });
+    }
+  }
+
+  function postForm(url, obj) {
+    return fetch(url, { method: 'POST', body: new URLSearchParams(obj) }).then(function (r) { return r.json(); });
+  }
+
+  document.body.addEventListener('click', function (ev) {
+    var t = ev.target;
+    if (t.dataset.act === 'rescan') {
+      post('/rescan').then(function () { note('Rescan triggered'); });
+
+    } else if (t.dataset.approve) {
+      t.disabled = true; t.textContent = 'Sending…';
+      post('/remote/jobs/' + t.dataset.approve + '/approve').then(function (r) {
+        note(r.ok ? 'Approved' : (r.error || 'Approve failed')); refresh();
+      });
+    } else if (t.dataset.reject) {
+      post('/jobs/' + t.dataset.reject + '/reject').then(function () { note('Rejected'); refresh(); });
+
+    } else if (t.hasAttribute('data-email-toggle')) {
+      t.closest('.r-card').querySelector('[data-email-row]').classList.toggle('open');
+    } else if (t.dataset.emailSend) {
+      var row = t.closest('[data-email-row]');
+      var addr = row.querySelector('input').value.trim();
+      if (!addr) { note('Enter a recipient'); return; }
+      t.disabled = true;
+      postForm('/remote/jobs/' + t.dataset.emailSend + '/approve',
+        { recipient_email: addr, delivery_mode: 'email' })
+        .then(function (r) { note(r.ok ? 'Emailed ' + addr : (r.error || 'Email failed')); refresh(); });
+
+    } else if (t.hasAttribute('data-clip-email-toggle')) {
+      t.closest('[data-clip-tools]').querySelector('[data-clip-email-row]').classList.toggle('open');
+    } else if (t.hasAttribute('data-clip-hide')) {
+      var projH = t.closest('.r-proj');
+      var idH = selectedClipId(projH);
+      if (!idH) { note('Pick a clip first'); return; }
+      if (!window.confirm('Hide this clip from the kiosk and gallery? You can unhide it later from the Hidden clips page.')) return;
+      t.disabled = true;
+      postForm('/jobs/' + idH + '/hide', {})
+        .then(function (r) { note(r.ok ? 'Clip hidden' : (r.error || 'Hide failed')); t.disabled = false; if (r.ok) refresh(); });
+    } else if (t.hasAttribute('data-clip-email-send')) {
+      var proj = t.closest('.r-proj');
+      var id = selectedClipId(proj);
+      var addr2 = t.closest('[data-clip-email-row]').querySelector('input').value.trim();
+      if (!id || !addr2) { note('Pick a clip and a recipient'); return; }
+      t.disabled = true;
+      postForm('/remote/jobs/' + id + '/email', { recipient_email: addr2 })
+        .then(function (r) { note(r.ok ? 'Emailed ' + addr2 : (r.error || 'Email failed')); t.disabled = false; if (r.ok) refresh(); });
+    } else if (t.hasAttribute('data-pause')) {
+      var proj3 = t.closest('.r-proj');
+      var sel = proj3.querySelector('[data-live]');
+      var resuming = t.textContent.indexOf('Resume') !== -1;
+      post('/projects/' + encodeURIComponent(proj3.dataset.project) + '/kiosk/live',
+        'job_id=' + encodeURIComponent(sel.value) + '&paused=' + (resuming ? '0' : '1'))
+        .then(function () { note(resuming ? 'Playback resumed' : 'Playback paused'); refresh(); });
+
+    } else if (t.closest('[data-gallery-pick]')) {
+      var tile = t.closest('[data-gallery-pick]');
+      var proj4 = tile.closest('.r-proj');
+      var sel4 = proj4.querySelector('[data-live]');
+      sel4.value = tile.dataset.galleryPick;
+      sel4.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (t.hasAttribute('data-gallery-more')) {
+      galleryCount += 8;
+      refresh();
+    }
+  });
+
+  document.body.addEventListener('change', function (ev) {
+    if (!ev.target.hasAttribute('data-live')) return;
+    var proj = ev.target.closest('.r-proj');
+    var pauseBtn = proj.querySelector('[data-pause]');
+    var paused = pauseBtn.textContent.indexOf('Resume') !== -1;
+    // keep the clip-email recipient field in step with the picked clip
+    var opt = ev.target.selectedOptions[0];
+    var emailInput = proj.querySelector('[data-clip-email-row] input');
+    if (opt && emailInput && opt.dataset.recipient) emailInput.value = opt.dataset.recipient;
+    syncClipTools(proj);
+    post('/projects/' + encodeURIComponent(proj.dataset.project) + '/kiosk/live',
+      'job_id=' + encodeURIComponent(ev.target.value) + '&paused=' + (paused ? '1' : '0'))
+      .then(function () { note('Kiosk clip set'); });
+  });
+
+  refresh();
+  setInterval(refresh, 3000);
+})();
+</script>
+</body>
+</html>

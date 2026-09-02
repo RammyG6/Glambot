@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Your video</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  body { max-width: 520px; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; }
+  h1 { font-size: 1.3rem; }
+  .guest-video { width: 100%; border-radius: 14px; background: #000; display: block; margin: 1rem 0; }
+  .btn-download { display: block; width: 100%; text-align: center; font-size: 1.1rem; padding: .9rem; margin: 1rem 0; }
+  .pin-input { width: 100%; text-align: center; letter-spacing: .3em; font-size: 1.2rem; }
+  .muted { color: var(--text-secondary); font-size: .9rem; }
+</style>
+</head>
+<body>
+{% if locked %}
+  <h1>Enter the PIN</h1>
+  <p class="muted">It's printed on the card with the QR code.</p>
+  {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+  <form method="post" action="{{ url_for('guest.unlock', token=token) }}">
+    <input class="pin-input" type="password" name="pin" inputmode="numeric" autocomplete="off" autofocus required>
+    <button type="submit" class="btn btn-primary btn-download">Unlock</button>
+  </form>
+{% else %}
+  <h1>{{ job.filename }}</h1>
+  <video class="guest-video" controls playsinline preload="metadata" src="{{ url_for('guest.download_stream', token=token) }}"></video>
+  <a class="btn btn-primary btn-download" href="{{ url_for('guest.download_file', token=token) }}">Download video</a>
+  <p class="muted">Once the download finishes you can turn Wi-Fi back off.</p>
+  <p><a href="{{ url_for('guest.gallery', project=job.project) }}">See all videos from this event &rarr;</a></p>
+{% endif %}
+</body>
+</html>

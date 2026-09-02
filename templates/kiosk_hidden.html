@@ -17,12 +17,13 @@
   .clip .thumb { width: 100%; max-height: 220px; object-fit: contain; border-radius: var(--radius); margin-bottom: .9rem; }
   .clip .name { font-size: .85rem; color: var(--text-secondary); margin-bottom: .8rem; word-break: break-word; }
   .unhide-btn { width: 100%; }
+  .delete-btn { width: 100%; margin-top: .5rem; }
 </style>
 </head>
 <body>
   <a class="back" href="{{ url_for('kiosk_live', project=project) }}">&larr; Back to kiosk</a>
   <h1>Hidden clips</h1>
-  <p class="sub">{{ project }} — hidden from the kiosk screen but not deleted. Unhide to bring one back.</p>
+  <p class="sub">{{ project }} — hidden from the kiosk screen but not deleted. Unhide to bring one back, or delete permanently (password required) to remove the clip and its files for good.</p>
 
   <div class="grid" id="grid">
     {% for item in items %}
@@ -31,6 +32,7 @@
              onerror="this.style.display='none'">
         <div class="name">{{ item.job.filename }}</div>
         <button type="button" class="btn btn-secondary unhide-btn" data-unhide-id="{{ item.job.id }}">Unhide</button>
+        <button type="button" class="btn btn-danger-ghost delete-btn" data-delete-id="{{ item.job.id }}">Delete permanently</button>
       </div>
     {% endfor %}
   </div>
@@ -41,11 +43,29 @@
     (function () {
       var grid = document.getElementById('grid');
       grid.addEventListener('click', function (ev) {
-        var btn = ev.target.closest('.unhide-btn');
-        if (!btn) { return; }
-        var id = btn.dataset.unhideId;
-        fetch('/jobs/' + id + '/unhide', { method: 'POST' })
-          .then(function () { var tile = btn.closest('.clip'); if (tile) { tile.remove(); } });
+        var unhideBtn = ev.target.closest('.unhide-btn');
+        if (unhideBtn) {
+          var id = unhideBtn.dataset.unhideId;
+          fetch('/jobs/' + id + '/unhide', { method: 'POST' })
+            .then(function () { var tile = unhideBtn.closest('.clip'); if (tile) { tile.remove(); } });
+          return;
+        }
+        var deleteBtn = ev.target.closest('.delete-btn');
+        if (deleteBtn) {
+          var delId = deleteBtn.dataset.deleteId;
+          var pw = window.prompt('Delete password — this permanently removes the clip and its files:');
+          if (pw === null) { return; }
+          deleteBtn.disabled = true;
+          fetch('/jobs/' + delId + '/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'password=' + encodeURIComponent(pw),
+          }).then(function (r) { return r.json(); }).then(function (r) {
+            deleteBtn.disabled = false;
+            if (r.ok) { var tile = deleteBtn.closest('.clip'); if (tile) { tile.remove(); } }
+            else { window.alert(r.error || 'Delete failed.'); }
+          }).catch(function () { deleteBtn.disabled = false; window.alert('Delete failed.'); });
+        }
       });
     })();
   </script>

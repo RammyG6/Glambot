@@ -105,6 +105,7 @@ class InboxWatcher:
 
     def start(self) -> None:
         self.inbox_dir.mkdir(parents=True, exist_ok=True)
+        self.store.prune_forced_imports()
         self._recover_stuck_jobs()
         self._sync_watches()
         self._observer.start()
@@ -261,21 +262,28 @@ class InboxWatcher:
             return
         resolved = str(path.resolve())
         key = (resolved, project)
+        # A force-render marker (hand-picked on the Import page) overrides the
+        # normal "already seen / already has a job" short-circuits so the
+        # operator can deliberately re-render a clip that's been processed
+        # before. The marker itself is consumed later in _process_path().
+        forced = self.store.has_forced_import(resolved)
         with self._seen_lock:
-            if key in self._seen:
+            if key in self._seen and not forced:
                 return
-        existing = self.store.find_by_source(resolved)
-        if existing is not None and (self.inbox_dir / existing.project / "config.json").exists():
-            # This file already has a job under a project that STILL EXISTS —
-            # it's handled, so don't reprocess or reassign it. This is what
-            # keeps switching the active project on a shared folder from
-            # churning every already-processed clip: only files with no job,
-            # or an orphaned job left by a since-DELETED project, fall through
-            # to be processed under the now-active project.
-            with self._seen_lock:
-                self._seen.add(key)
-            return
+        if not forced:
+            existing = self.store.find_by_source(resolved)
+            if existing is not None and (self.inbox_dir / existing.project / "config.json").exists():
+                # This file already has a job under a project that STILL EXISTS —
+                # it's handled, so don't reprocess or reassign it. This is what
+                # keeps switching the active project on a shared folder from
+                # churning every already-processed clip: only files with no job,
+                # or an orphaned job left by a since-DELETED project, fall through
+                # to be processed under the now-active project.
+                with self._seen_lock:
+                    self._seen.add(key)
+                return
         with self._seen_lock:
+            self._seen.discard(key)  # a forced re-import must not be blocked by a stale entry
             self._seen.add(key)
         threading.Thread(target=self._wait_and_enqueue, args=(path,), daemon=True).start()
 
@@ -359,14 +367,18 @@ class InboxWatcher:
         project_dir = self.inbox_dir / project
         source_path = str(path.resolve())
 
+        forced = self.store.take_forced_import(source_path)
+
         job = self.store.find_by_source(source_path)
         if job is None:
             # No job for this path — but the same footage may already have
             # been processed for this project under a different path (an FTP
             # client re-uploading, a rename, a file moved between folders).
-            # Hash-matching catches that; path-matching alone cannot.
+            # Hash-matching catches that; path-matching alone cannot. A file
+            # hand-picked on the Import page (forced) deliberately skips this
+            # so the operator can re-render footage on purpose.
             digest = content_hash(path)
-            if digest is not None:
+            if digest is not None and not forced:
                 duplicate = self.store.find_by_hash(digest, project)
                 if duplicate is not None:
                     logger.info(
@@ -387,6 +399,15 @@ class InboxWatcher:
                 job.id, project=project, recipient_email=None,
                 output_path=None, thumbnail_path=None, secondary_output_path=None,
                 drive_link=None, secondary_drive_link=None, error=None,
+            )
+        elif forced:
+            # Deliberate re-render of a clip that already has a job (e.g. a
+            # rejected/sent one re-imported from the Import page). Flip it back
+            # into the pipeline and drop stale delivery links so a re-approve
+            # actually re-uploads (same reset override_job does).
+            job = self.store.update_job(
+                job.id, status="processing", error=None, progress=0,
+                drive_link=None, secondary_drive_link=None,
             )
 
         try:

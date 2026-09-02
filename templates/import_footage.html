@@ -9,12 +9,6 @@
   .browse-row { display: flex; gap: .5rem; align-items: flex-start; margin-top: .35rem; }
   .browse-row input { flex: 1; margin-top: 0; }
   .browse-row button { margin-top: 0; padding: .55rem 1rem; white-space: nowrap; font-size: .85rem; }
-  .folder-browser { display: none; border: 1px solid var(--border); border-radius: var(--radius-sm); margin-top: .5rem; padding: .6rem; background: var(--bg-elevated-2); max-height: 220px; overflow-y: auto; }
-  .folder-browser.open { display: block; }
-  .folder-browser .crumb { font-size: .78rem; color: var(--text-secondary); margin-bottom: .4rem; word-break: break-all; }
-  .folder-browser ul { list-style: none; margin: 0; padding: 0; }
-  .folder-browser li { padding: .4rem .5rem; cursor: pointer; border-radius: 6px; font-size: .85rem; }
-  .folder-browser li:hover { background: rgba(255,255,255,0.08); }
   .files-panel { margin-top: 1.5rem; }
   .bulk { display: flex; gap: .75rem; margin: 0 0 1rem; }
   .bulk button { margin: 0; padding: .3rem .8rem; font-size: .78rem; }
@@ -25,6 +19,16 @@
   .file-list .size { color: var(--text-secondary); font-size: .78rem; margin-left: auto; }
   .empty-note { color: var(--text-secondary); font-size: .85rem; }
   .actions { margin-top: 1.5rem; }
+  .modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 50; }
+  .modal-backdrop.open { display: flex; align-items: center; justify-content: center; }
+  .modal-card { background: var(--bg-elevated-2, #1e1e1e); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1.5rem; max-width: 560px; width: calc(100% - 2rem); max-height: 80vh; overflow-y: auto; }
+  .modal-card h2 { margin-top: 0; }
+  .conflict-list { list-style: none; padding: 0; margin: 1rem 0; }
+  .conflict-list li { border: 1px solid var(--border); border-radius: 6px; padding: .6rem .75rem; margin-bottom: .6rem; font-size: .86rem; }
+  .conflict-list .why { color: var(--text-secondary); font-size: .8rem; margin: .2rem 0 .5rem; }
+  .conflict-list .opts { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .conflict-list .opts label { display: flex; gap: .3rem; align-items: center; cursor: pointer; }
+  .modal-actions { display: flex; gap: .75rem; justify-content: flex-end; }
 </style>
 </head>
 <body>
@@ -46,19 +50,12 @@
   <form method="post" id="importForm">
     <label for="folderInput">Source folder</label>
     <div class="browse-row">
-      <input type="text" id="folderInput" name="folder" placeholder="Type or paste a folder path, or use Browse&hellip;">
-      <button type="button" class="btn btn-secondary btn-sm" id="loadButton">Load</button>
-      <button type="button" class="btn btn-secondary btn-sm" id="browseButton">Browse&hellip;</button>
+      <input type="text" id="folderInput" name="folder" placeholder="Pick footage with the buttons, or type/paste a folder path">
+      <button type="button" class="btn btn-secondary btn-sm" id="pickFilesButton">Choose files&hellip;</button>
+      <button type="button" class="btn btn-secondary btn-sm" id="pickFolderButton">Choose folder&hellip;</button>
+      <button type="button" class="btn btn-secondary btn-sm" id="listButton" style="display:none">List files</button>
     </div>
-    <div class="flash error" id="notFoundWarning" style="display:none">
-      That folder wasn't found &mdash; showing your home folder instead. Check
-      for a typo, or a stray quote/space if you pasted the path from
-      Explorer's "Copy as path".
-    </div>
-    <div class="folder-browser open" id="folderBrowser">
-      <div class="crumb" id="folderBrowserPath"></div>
-      <ul id="folderBrowserList"></ul>
-    </div>
+    <div class="flash error" id="notFoundWarning" style="display:none"></div>
 
     <div class="files-panel">
       <div class="bulk">
@@ -66,7 +63,7 @@
         <button type="button" class="btn btn-secondary btn-sm" id="selNone">Select none</button>
       </div>
       <ul class="file-list" id="fileList"></ul>
-      <p class="empty-note" id="emptyNote">Loading&hellip;</p>
+      <p class="empty-note" id="emptyNote">No footage selected yet.</p>
     </div>
 
     <div class="actions">
@@ -74,23 +71,33 @@
     </div>
   </form>
 
+  <div class="modal-backdrop" id="conflictModal">
+    <div class="modal-card">
+      <h2>Resolve import conflicts</h2>
+      <p class="hint">Some selected files clash with something Glambot already has. Choose what to do with each, then continue. Everything imported here is (re-)rendered.</p>
+      <ul class="conflict-list" id="conflictList"></ul>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="cancelImport">Cancel import</button>
+        <button type="button" class="btn btn-primary" id="continueImport">Continue</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     (function () {
       var folderInput = document.getElementById('folderInput');
-      var loadButton = document.getElementById('loadButton');
-      var browseButton = document.getElementById('browseButton');
-      var folderBrowser = document.getElementById('folderBrowser');
-      var folderBrowserPath = document.getElementById('folderBrowserPath');
-      var folderBrowserList = document.getElementById('folderBrowserList');
+      var pickFilesButton = document.getElementById('pickFilesButton');
+      var pickFolderButton = document.getElementById('pickFolderButton');
+      var listButton = document.getElementById('listButton');
       var fileList = document.getElementById('fileList');
       var emptyNote = document.getElementById('emptyNote');
       var notFoundWarning = document.getElementById('notFoundWarning');
 
-      function renderFiles(files) {
+      function renderFiles(files, checked) {
         fileList.innerHTML = '';
         if (!files.length) {
           emptyNote.style.display = '';
-          emptyNote.textContent = 'No footage files found directly in this folder.';
+          emptyNote.textContent = 'No footage files here yet - use the buttons above.';
           return;
         }
         emptyNote.style.display = 'none';
@@ -99,7 +106,8 @@
           var sizeMb = (f.size / (1024 * 1024)).toFixed(1);
           var label = document.createElement('label');
           var box = document.createElement('input');
-          box.type = 'checkbox'; box.name = 'files'; box.value = f.name; box.checked = true;
+          box.type = 'checkbox'; box.name = 'files'; box.value = f.name;
+          box.checked = checked === undefined ? true : checked;
           var name = document.createElement('span');
           name.textContent = f.name;
           var size = document.createElement('span');
@@ -110,47 +118,150 @@
         });
       }
 
-      function loadFolder(path) {
-        var qs = (path ? ('path=' + encodeURIComponent(path) + '&') : '') + 'files=1';
-        fetch('/browse?' + qs)
-          .then(function (r) { return r.json(); })
-          .then(function (data) {
-            notFoundWarning.style.display = data.not_found ? '' : 'none';
-            folderInput.value = data.path;
-            folderBrowserPath.textContent = data.path;
-            folderBrowserList.innerHTML = '';
-            if (data.parent) {
-              var up = document.createElement('li');
-              up.textContent = '.. (up)';
-              up.addEventListener('click', function () { loadFolder(data.parent); });
-              folderBrowserList.appendChild(up);
-            }
-            data.folders.forEach(function (name) {
-              var li = document.createElement('li');
-              li.textContent = name;
-              li.addEventListener('click', function () {
-                loadFolder(data.path + (data.path.endsWith('/') ? '' : '/') + name);
-              });
-              folderBrowserList.appendChild(li);
-            });
-            renderFiles(data.files || []);
-          });
+      function warn(msg) {
+        notFoundWarning.textContent = msg;
+        notFoundWarning.style.display = msg ? '' : 'none';
       }
 
-      loadButton.addEventListener('click', function () {
-        loadFolder(folderInput.value.trim() || null);
-        folderBrowser.classList.add('open');
+      // List every footage file in a typed folder path - the fallback for when
+      // the native picker isn't available (e.g. opened from another machine).
+      function listTypedFolder() {
+        var path = folderInput.value.trim();
+        if (!path) { return; }
+        fetch('/browse?files=1&path=' + encodeURIComponent(path))
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (data.not_found) { warn('That folder wasn’t found - check for a typo or stray quotes.'); renderFiles([]); return; }
+            warn('');
+            folderInput.value = data.path;
+            renderFiles(data.files || []);
+          })
+          .catch(function () { warn('Could not reach the server.'); });
+      }
+
+      function pick(kind, onFolder) {
+        var body = new FormData();
+        body.append('kind', kind);
+        body.append('initial', folderInput.value.trim());
+        pickFilesButton.disabled = pickFolderButton.disabled = true;
+        fetch('{{ url_for("pick") }}', { method: 'POST', body: body })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (data.ok) { warn(''); onFolder(data); return; }
+            if (data.reason === 'unsupported') {
+              listButton.style.display = '';
+              warn('The picker only works on the Glambot PC - type or paste a folder path, then "List files".');
+            } else if (data.reason === 'multi_folder') {
+              warn('Pick footage from one folder at a time.');
+            } else if (data.reason && data.reason !== 'cancelled') {
+              warn(data.error || 'The picker failed.');
+            }
+          })
+          .catch(function () { warn('Could not reach the server.'); })
+          .then(function () { pickFilesButton.disabled = pickFolderButton.disabled = false; });
+      }
+
+      pickFilesButton.addEventListener('click', function () {
+        pick('footage', function (data) {
+          folderInput.value = data.folder;
+          renderFiles(data.files);
+        });
       });
+      pickFolderButton.addEventListener('click', function () {
+        pick('folder', function (data) {
+          folderInput.value = data.path;
+          listTypedFolder();
+        });
+      });
+      listButton.addEventListener('click', listTypedFolder);
       folderInput.addEventListener('keydown', function (ev) {
-        if (ev.key === 'Enter') {
-          ev.preventDefault();
-          loadFolder(folderInput.value.trim() || null);
-          folderBrowser.classList.add('open');
-        }
+        if (ev.key === 'Enter') { ev.preventDefault(); listTypedFolder(); }
       });
 
-      browseButton.addEventListener('click', function () {
-        folderBrowser.classList.toggle('open');
+      // ---- Import: force-render, but confirm any collision first ----
+      var form = document.getElementById('importForm');
+      var modal = document.getElementById('conflictModal');
+      var conflictList = document.getElementById('conflictList');
+      var bypassCheck = false;
+
+      function selectedNames() {
+        return Array.prototype.slice
+          .call(fileList.querySelectorAll('input[type="checkbox"]:checked'))
+          .map(function (b) { return b.value; });
+      }
+
+      form.addEventListener('submit', function (ev) {
+        if (bypassCheck) { return; }
+        var names = selectedNames();
+        if (!names.length) { return; }
+        ev.preventDefault();
+        var body = new FormData();
+        body.append('folder', folderInput.value.trim());
+        names.forEach(function (n) { body.append('files', n); });
+        fetch('{{ url_for("import_footage_check", project=project) }}', { method: 'POST', body: body })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (!data.ok) { alert(data.error || 'Could not check for conflicts.'); return; }
+            if (!data.conflicts.length) { bypassCheck = true; form.submit(); return; }
+            showConflicts(data.conflicts);
+          })
+          .catch(function () { alert('Could not reach the server.'); });
+      });
+
+      function showConflicts(conflicts) {
+        conflictList.innerHTML = '';
+        conflicts.forEach(function (c) {
+          var reasons = [];
+          if (c.name_collision) { reasons.push('a file named "' + c.name + '" is already in the destination folder'); }
+          if (c.duplicate_job) {
+            reasons.push('identical footage was already rendered for this project as job #' +
+              c.duplicate_job.id + ' (' + c.duplicate_job.filename + ', ' + c.duplicate_job.status + ')');
+          }
+          var li = document.createElement('li');
+          var strong = document.createElement('strong');
+          strong.textContent = c.name;
+          li.appendChild(strong);
+          var why = document.createElement('div');
+          why.className = 'why'; why.textContent = reasons.join('; ') + '.';
+          li.appendChild(why);
+          var opts = document.createElement('div');
+          opts.className = 'opts';
+          [['rename', 'Rename (keep both)'],
+           ['replace', c.duplicate_job ? 'Replace (delete job #' + c.duplicate_job.id + ')' : 'Replace (overwrite)'],
+           ['skip', 'Skip']].forEach(function (pair, i) {
+            var label = document.createElement('label');
+            var radio = document.createElement('input');
+            radio.type = 'radio'; radio.name = 'decision::' + c.name; radio.value = pair[0];
+            if (i === 0) { radio.checked = true; }
+            label.appendChild(radio);
+            label.appendChild(document.createTextNode(' ' + pair[1]));
+            opts.appendChild(label);
+          });
+          li.appendChild(opts);
+          conflictList.appendChild(li);
+        });
+        modal.classList.add('open');
+      }
+
+      document.getElementById('cancelImport').addEventListener('click', function () {
+        modal.classList.remove('open');
+      });
+
+      document.getElementById('continueImport').addEventListener('click', function () {
+        Array.prototype.forEach.call(
+          form.querySelectorAll('input[type="hidden"][data-decision]'),
+          function (n) { n.remove(); });
+        var picked = conflictList.querySelectorAll('input[type="radio"]:checked');
+        Array.prototype.forEach.call(picked, function (radio) {
+          var name = radio.name.slice('decision::'.length);
+          var hidden = document.createElement('input');
+          hidden.type = 'hidden'; hidden.name = 'decision_' + name; hidden.value = radio.value;
+          hidden.setAttribute('data-decision', '1');
+          form.appendChild(hidden);
+        });
+        modal.classList.remove('open');
+        bypassCheck = true;
+        form.submit();
       });
 
       document.getElementById('selAll').addEventListener('click', function () {
@@ -160,7 +271,7 @@
         Array.prototype.forEach.call(fileList.querySelectorAll('input[type="checkbox"]'), function (b) { b.checked = false; });
       });
 
-      loadFolder(null);
+      renderFiles([]);
     })();
   </script>
 </body>

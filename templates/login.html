@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glambot — Sign in</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  body { max-width: none; padding: 0; margin: 0; }
+  .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+  .login-card { width: 100%; max-width: 340px; text-align: center; }
+  .login-card .brand-mark { margin: 0 auto 1rem; width: 44px; height: 44px; color: var(--text-primary); }
+  .login-card h1 { font-size: 1.25rem; margin: 0 0 1.5rem; }
+  .login-card input[type="password"] { width: 100%; text-align: center; letter-spacing: .3em; font-size: 1.1rem; }
+  .login-card .btn { width: 100%; justify-content: center; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<div class="login-wrap">
+  <form class="login-card" method="post" action="{{ url_for('auth.login') }}">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10l5-3v10l-5-3M4 6h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"/></svg>
+    </div>
+    <h1>Enter the Glambot PIN</h1>
+    {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+    <input type="password" name="pin" inputmode="numeric" autocomplete="off" autofocus required>
+    <input type="hidden" name="next" value="{{ next }}">
+    <button type="submit" class="btn btn-primary">Sign in</button>
+  </form>
+</div>
+</body>
+</html>

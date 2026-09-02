@@ -34,7 +34,13 @@ def main() -> None:
 
     inbox_dir = Path(os.environ.get("INBOX_DIR", "inbox")).resolve()
     host = os.environ.get("HOST", "127.0.0.1")
+    # BIND_HOST is what the socket actually listens on; HOST stays the address
+    # shown to the user / used to build links. Set BIND_HOST=0.0.0.0 to serve
+    # guests and iPads over the LAN.
+    bind_host = os.environ.get("BIND_HOST", host)
     port = int(os.environ.get("PORT", "5000"))
+
+    _warn_if_exposed_without_pin(bind_host)
 
     store = JobStore(inbox_dir / ".glambot" / "jobs.sqlite")
 
@@ -43,9 +49,19 @@ def main() -> None:
 
     app = create_app(inbox_dir, store, watcher)
     try:
-        app.run(host=host, port=port, debug=False, use_reloader=False)
+        app.run(host=bind_host, port=port, debug=False, use_reloader=False)
     finally:
         watcher.stop()
+
+
+def _warn_if_exposed_without_pin(bind_host: str) -> None:
+    loopback = bind_host in {"127.0.0.1", "::1", "localhost", ""}
+    if not loopback and not os.environ.get("GLAMBOT_PIN", "").strip():
+        logging.getLogger(__name__).warning(
+            "Glambot is binding to %s (reachable on the LAN) with no GLAMBOT_PIN set - "
+            "anyone on the network can open the operator dashboard. Set GLAMBOT_PIN in .env.",
+            bind_host,
+        )
 
 
 if __name__ == "__main__":
