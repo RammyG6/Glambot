@@ -6,16 +6,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  body { max-width: none; padding: 0; margin: 0; }
   .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; }
   .login-card { width: 100%; max-width: 340px; text-align: center; }
-  .login-card .brand-mark { margin: 0 auto 1rem; width: 44px; height: 44px; color: var(--text-primary); }
-  .login-card h1 { font-size: 1.25rem; margin: 0 0 1.5rem; }
-  .login-card input[type="password"] { width: 100%; text-align: center; letter-spacing: .3em; font-size: 1.1rem; }
-  .login-card .btn { width: 100%; justify-content: center; margin-top: 1rem; }
+  .login-card .brand-mark { margin: 0 auto 1.25rem; width: 48px; height: 48px; border-radius: 12px;
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #5e5ce6));
+    display: flex; align-items: center; justify-content: center; color: #fff; }
+  .login-card .brand-mark svg { width: 24px; height: 24px; }
+  .login-card h1 { font-size: var(--fs-2xl); margin: 0 0 1.5rem; }
+  .login-card input[type="password"] { text-align: center; letter-spacing: .3em; font-size: var(--fs-xl); }
+  .login-card .btn { width: 100%; margin-top: 1rem; }
 </style>
 </head>
-<body>
+<body class="page-full">
 <div class="login-wrap">
   <form class="login-card" method="post" action="{{ url_for('auth.login') }}">
     <div class="brand-mark">

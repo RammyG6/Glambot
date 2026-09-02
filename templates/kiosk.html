@@ -6,26 +6,25 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  html, body { height: 100%; margin: 0; }
+  html, body { height: 100%; }
   body {
-    max-width: none; background: var(--bg); color: var(--text);
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    min-height: 100vh; padding: 2rem; box-sizing: border-box; text-align: center;
+    min-height: 100vh; padding: 2rem; text-align: center;
   }
   .thumb {
     max-width: min(80vw, 480px); max-height: 45vh; border-radius: var(--radius);
     box-shadow: var(--shadow); margin-bottom: 2rem; object-fit: contain;
   }
   .qr-row { display: flex; gap: 1.5rem; flex-wrap: wrap; justify-content: center; }
-  .qr-wrap { background: #fff; padding: 1.5rem; border-radius: var(--radius-lg); text-align: center; }
-  .qr-wrap img { width: min(45vw, 280px); height: auto; display: block; }
-  .qr-wrap .qr-label { color: #1d1d1f; font-size: .85rem; font-weight: 600; margin-top: .6rem; }
-  h1 { font-size: clamp(1.4rem, 3vw, 2.2rem); margin: 1.5rem 0 .5rem; }
-  p.sub { color: var(--text-secondary); font-size: 1rem; }
-  a.exit { position: fixed; bottom: 1rem; right: 1rem; color: var(--text-secondary); font-size: .75rem; margin: 0; }
+  .qr-wrap { background: transparent; padding: 0; text-align: center; }
+  .qr-wrap img { width: min(45vw, 280px); height: auto; display: block; border-radius: var(--radius); }
+  .qr-wrap .qr-label { color: var(--text-secondary); font-size: var(--fs-sm); font-weight: 600; margin-top: .6rem; }
+  h1 { font-size: var(--fs-3xl); margin: 1.5rem 0 .5rem; }
+  p.sub { color: var(--text-secondary); font-size: var(--fs-md); }
+  a.exit { position: fixed; bottom: 1rem; right: 1rem; color: var(--text-secondary); font-size: var(--fs-xs); margin: 0; }
 </style>
 </head>
-<body>
+<body class="page-full">
   <img class="thumb" src="{{ url_for('thumbnail', job_id=job.id) }}" alt="Your clip"
        onerror="this.style.display='none'">
   <h1>Scan to download your video</h1>

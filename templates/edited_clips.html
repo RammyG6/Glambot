@@ -4,16 +4,8 @@
 <meta charset="utf-8">
 <title>Glambot — Email a delivered clip</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-<style>
-  body { max-width: none; padding: 0; margin: 0; }
-  @media (max-width: 900px) {
-    .sidebar { position: static; height: auto; width: 100% !important; }
-    .app-shell { flex-direction: column; }
-    .main { padding: 1.5rem 1.25rem 3rem; }
-  }
-</style>
 </head>
-<body>
+<body class="page-full">
 <div class="app-shell">
   {% set nav_mode = 'links' %}
   {% set active_tab = 'clips' %}

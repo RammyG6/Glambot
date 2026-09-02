@@ -5,18 +5,17 @@
 <title>Glambot — FTP import</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  body { max-width: none; padding: 0; margin: 0; }
   .ftp-status-row { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
   .ftp-status-row form { margin: 0; }
   .ftp-pill { display: inline-flex; align-items: center; gap: .4rem; font-weight: 600;
-              font-size: .8rem; padding: .28rem .75rem; border-radius: 999px;
+              font-size: var(--fs-xs); padding: .28rem .75rem; border-radius: var(--radius-pill);
               border: 1px solid var(--border); white-space: nowrap; }
-  .ftp-pill.on  { color: #0a7d33; border-color: #0a7d3355; background: #0a7d3311; }
+  .ftp-pill.on  { color: var(--success); border-color: rgba(48,209,88,.35); background: var(--success-bg); }
   .ftp-pill.off { color: var(--text-secondary); }
   .ftp-dot { width: .55rem; height: .55rem; border-radius: 50%; background: currentColor; }
-  .ftp-row-hint { font-size: .82rem; color: var(--text-secondary); margin: .5rem 0 0; }
+  .ftp-row-hint { font-size: var(--fs-xs); color: var(--text-secondary); margin: .5rem 0 0; }
   .ftp-kv { display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1rem;
-            font-size: .9rem; margin-top: .8rem; }
+            font-size: var(--fs-base); margin-top: .8rem; }
   .ftp-kv dt { color: var(--text-secondary); }
   .ftp-kv dd { margin: 0; font-family: ui-monospace, Menlo, Consolas, monospace; }
   .ftp-kv dd .hint { font-family: inherit; color: var(--text-secondary); font-size: .82rem; }
@@ -28,33 +27,28 @@
   .ftp-list { font-size: .82rem; font-family: ui-monospace, Menlo, Consolas, monospace;
               max-height: 200px; overflow-y: auto; }
   .ftp-list div { padding: .12rem 0; }
-  .ftp-list .up { color: #0a7d33; }
+  .ftp-list .up { color: var(--success); }
   .ftp-list .muted { color: var(--text-secondary); font-family: inherit; }
   .ftp-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
                    gap: .3rem 1rem; align-items: start; }
   .ftp-form .field { margin-bottom: .9rem; }
-  .ftp-warn { border: 1px solid #b4700055; background: #b4700011; border-radius: var(--radius-sm);
-              padding: .7rem .9rem; margin-top: .8rem; font-size: .9rem; }
+  .ftp-warn { border: 1px solid rgba(224,163,58,.35); background: var(--warning-bg); border-radius: var(--radius-sm);
+              padding: .7rem .9rem; margin-top: .8rem; font-size: var(--fs-base); }
   .ftp-warn .btn { margin-top: .5rem; }
   code.cmd { display: block; white-space: pre-wrap; word-break: break-all; margin-top: .4rem;
-             padding: .5rem .7rem; background: var(--bg-subtle, #f4f4f5); border-radius: 6px; font-size: .8rem; }
-  .ftp-modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex;
-                        align-items: center; justify-content: center; z-index: 50; }
+             padding: .5rem .7rem; background: var(--bg-subtle); border-radius: var(--radius-sm); font-size: var(--fs-xs); }
+  .ftp-modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex;
+                        align-items: center; justify-content: center; z-index: 50; padding: 1.5rem; }
   .ftp-modal-backdrop[hidden] { display: none !important; }
   .ftp-warn[hidden] { display: none !important; }
-  .ftp-modal { background: var(--bg, #fff); border-radius: var(--radius-lg, 12px); max-width: 440px;
-               width: calc(100% - 2rem); padding: 1.4rem 1.5rem; box-shadow: 0 12px 40px rgba(0,0,0,.25); }
-  .ftp-modal h2 { margin: 0 0 .5rem; font-size: 1.05rem; }
-  .ftp-modal p { font-size: .9rem; color: var(--text-secondary); }
+  .ftp-modal { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); max-width: 440px;
+               width: 100%; padding: 1.5rem 1.6rem; box-shadow: var(--shadow); }
+  .ftp-modal h2 { margin: 0 0 .75rem; font-size: var(--fs-lg); color: var(--text); }
+  .ftp-modal p { font-size: var(--fs-base); color: var(--text-secondary); }
   .ftp-modal-actions { display: flex; gap: .6rem; justify-content: flex-end; margin-top: 1rem; }
-  @media (max-width: 900px) {
-    .sidebar { position: static; height: auto; width: 100% !important; }
-    .app-shell { flex-direction: column; }
-    .main { padding: 1.5rem 1.25rem 3rem; }
-  }
 </style>
 </head>
-<body>
+<body class="page-full">
 <div class="app-shell">
   {% set nav_mode = 'links' %}
   {% set active_tab = 'ftp' %}

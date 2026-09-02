@@ -11,11 +11,10 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  body { max-width: none; padding: 0; margin: 0; }
   .banner { width: 100%; max-height: 220px; object-fit: cover; border-radius: var(--radius-lg); margin: 0 0 1.5rem; display: block; }
   .clip-bar.indeterminate > span { width: 35% !important; animation: slide 1.2s ease-in-out infinite; }
   @keyframes slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
-  .video-frame { border-radius: 14px; overflow: hidden; margin-bottom: 1.25rem; background: #000; }
+  .video-frame { border-radius: var(--radius); overflow: hidden; margin-bottom: 1.25rem; background: #000; }
   .video-frame video { width: 100%; max-height: 380px; display: block; }
   .adv-edit { margin: -0.5rem 0 1.25rem; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .5rem .9rem; }
   .adv-edit summary { cursor: pointer; font-weight: 600; font-size: .85rem; color: var(--text-secondary); }
@@ -23,7 +22,7 @@
   .adv-edit label { font-size: .82rem; }
   .adv-edit input[type=range] { width: 100%; }
   .adv-actions { display: flex; gap: .6rem; margin-top: .3rem; flex-wrap: wrap; }
-  .adv-preview-video { width: 100%; max-width: 420px; border-radius: 10px; background: #000; margin-top: .5rem; }
+  .adv-preview-video { width: 100%; max-width: 420px; border-radius: var(--radius-sm); background: #000; margin-top: .5rem; }
   .adv-editor { display: flex; flex-direction: column; gap: .5rem; }
   .adv-editor .adv-grade { display: flex; flex-direction: column; gap: .4rem; }
   .adv-editor label { font-size: .82rem; }
@@ -37,14 +36,9 @@
   .sent-tool > summary { cursor: pointer; font-weight: 600; font-size: .82rem; color: var(--text-secondary); }
   .sent-email-form { display: flex; flex-direction: column; gap: .5rem; margin-top: .6rem; }
   .sent-email-form textarea { min-height: 5rem; width: 100%; }
-  @media (max-width: 900px) {
-    .sidebar { position: static; height: auto; width: 100% !important; }
-    .app-shell { flex-direction: column; }
-    .main { padding: 1.5rem 1.25rem 3rem; }
-  }
 </style>
 </head>
-<body>
+<body class="page-full">
 <div class="app-shell">
 
   {% set nav_mode = 'tabs' %}
@@ -168,7 +162,7 @@
         <div class="section">
           <div class="section-head">
             <h2 class="section-title">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9L2.7 17a1.6 1.6 0 0 0 1.4 2.4h15.8a1.6 1.6 0 0 0 1.4-2.4L13.7 3.9a1.6 1.6 0 0 0-2.8 0z"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9L2.7 17a1.6 1.6 0 0 0 1.4 2.4h15.8a1.6 1.6 0 0 0 1.4-2.4L13.7 3.9a1.6 1.6 0 0 0-2.8 0z"/></svg>
               Auto-Delivery Needs Attention
             </h2>
             {% if auto_failed | length > 1 %}
@@ -188,8 +182,8 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
                     {{ job.project }}
                   </div>
-                  <div style="font-size:.88rem;font-weight:600">{{ job.filename }}</div>
-                  <div style="display:flex;align-items:center;gap:.35rem;color:#ff8a80;font-size:.8rem;margin-top:.3rem">
+                  <div class="clip-title">{{ job.filename }}</div>
+                  <div style="display:flex;align-items:center;gap:.35rem;color:var(--danger-text);font-size:.8rem;margin-top:.3rem">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/></svg>
                     {{ job.error }}
                   </div>
@@ -334,7 +328,7 @@
               </form>
               <form method="post" action="{{ url_for('reject', job_id=job.id) }}" style="display:inline">
                 <button type="submit" class="btn btn-danger-ghost" style="margin-top:.65rem">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
                   Reject
                 </button>
               </form>
@@ -466,7 +460,7 @@
                     {{ p }}{% if pg.shared and p == pg.active %} &middot; active{% endif %}
                     {% if pg.errors.get(p) %}
                       <span class="chip-warn" title="{{ pg.errors[p] }}">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9L2.7 17a1.6 1.6 0 0 0 1.4 2.4h15.8a1.6 1.6 0 0 0 1.4-2.4L13.7 3.9a1.6 1.6 0 0 0-2.8 0z"/></svg>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9L2.7 17a1.6 1.6 0 0 0 1.4 2.4h15.8a1.6 1.6 0 0 0 1.4-2.4L13.7 3.9a1.6 1.6 0 0 0-2.8 0z"/></svg>
                         config error
                       </span>
                     {% endif %}

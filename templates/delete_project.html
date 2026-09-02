@@ -5,24 +5,24 @@
 <title>Glambot &mdash; Delete project</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  body { max-width: 720px; margin: 3rem auto; padding: 0 1.5rem 3rem; }
-  .danger { border-color: #ff8a80; }
-  .warn { color: #ff8a80; font-weight: 600; }
-  .note { color: var(--text-secondary); font-size: .9rem; }
+  body { margin: 3rem auto; padding: 0 1.5rem 3rem; }
+  .danger { border-color: rgba(255,69,58,0.35); }
+  .warn { color: var(--danger-text); font-weight: 600; }
+  .note { color: var(--text-secondary); font-size: var(--fs-base); }
   .targets { list-style: none; padding: 0; margin: 1rem 0; }
-  .targets li { padding: .6rem 0; border-bottom: 1px solid var(--border); font-size: .88rem; }
+  .targets li { padding: .6rem 0; border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
   .targets .label { font-weight: 600; }
   .targets code { display: inline-block; margin: .2rem 0; word-break: break-all; }
   .targets .kept { color: var(--text-secondary); }
   .targets .kept .label::after { content: ' - kept'; font-weight: 400; color: var(--text-secondary); }
-  .targets .gone .label { color: #ff8a80; }
+  .targets .gone .label { color: var(--danger-text); }
   .pw-field { margin: 1rem 0; }
-  .pw-field label { display: block; font-size: .85rem; margin-bottom: .3rem; }
-  .pw-field input { width: 100%; max-width: 320px; }
+  .pw-field label { display: block; font-size: var(--fs-sm); margin-bottom: .3rem; }
+  .pw-field input { max-width: 320px; }
   .actions { display: flex; gap: .75rem; align-items: center; margin-top: 1.5rem; }
 </style>
 </head>
-<body>
+<body class="page">
   <h1>Delete &ldquo;{{ project }}&rdquo;</h1>
 
   {% with messages = get_flashed_messages(with_categories=true) %}

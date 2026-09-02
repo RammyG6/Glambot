@@ -5,33 +5,30 @@
 <title>Glambot — Import footage — {{ project }}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  body { max-width: 720px; margin: 3rem auto; padding: 0 1.5rem 3rem; }
-  .browse-row { display: flex; gap: .5rem; align-items: flex-start; margin-top: .35rem; }
-  .browse-row input { flex: 1; margin-top: 0; }
-  .browse-row button { margin-top: 0; padding: .55rem 1rem; white-space: nowrap; font-size: .85rem; }
+  body { margin: 3rem auto; padding: 0 1.5rem 3rem; }
+  .browse-row { display: flex; gap: .5rem; align-items: flex-start; margin-top: .35rem; flex-wrap: wrap; }
+  .browse-row input { flex: 1 1 240px; margin-top: 0; }
   .files-panel { margin-top: 1.5rem; }
-  .bulk { display: flex; gap: .75rem; margin: 0 0 1rem; }
-  .bulk button { margin: 0; padding: .3rem .8rem; font-size: .78rem; }
+  .bulk { display: flex; gap: .75rem; margin: 0 0 1rem; flex-wrap: wrap; }
   .file-list { list-style: none; padding: 0; margin: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); max-height: 320px; overflow-y: auto; }
-  .file-list li { padding: .5rem .75rem; border-bottom: 1px solid var(--border); font-size: .86rem; }
+  .file-list li { padding: .5rem .75rem; border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
   .file-list li:last-child { border-bottom: none; }
   .file-list label { display: flex; gap: .6rem; align-items: center; cursor: pointer; }
-  .file-list .size { color: var(--text-secondary); font-size: .78rem; margin-left: auto; }
-  .empty-note { color: var(--text-secondary); font-size: .85rem; }
+  .file-list .size { color: var(--text-secondary); font-size: var(--fs-xs); margin-left: auto; }
+  .empty-note { color: var(--text-secondary); font-size: var(--fs-sm); }
   .actions { margin-top: 1.5rem; }
-  .modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 50; }
-  .modal-backdrop.open { display: flex; align-items: center; justify-content: center; }
-  .modal-card { background: var(--bg-elevated-2, #1e1e1e); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1.5rem; max-width: 560px; width: calc(100% - 2rem); max-height: 80vh; overflow-y: auto; }
-  .modal-card h2 { margin-top: 0; }
+  .modal-backdrop { display: none; }
+  .modal-backdrop.open { display: flex; }
+  .modal-card { max-width: 560px; max-height: 80vh; overflow-y: auto; }
   .conflict-list { list-style: none; padding: 0; margin: 1rem 0; }
-  .conflict-list li { border: 1px solid var(--border); border-radius: 6px; padding: .6rem .75rem; margin-bottom: .6rem; font-size: .86rem; }
-  .conflict-list .why { color: var(--text-secondary); font-size: .8rem; margin: .2rem 0 .5rem; }
+  .conflict-list li { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .6rem .75rem; margin-bottom: .6rem; font-size: var(--fs-sm); }
+  .conflict-list .why { color: var(--text-secondary); font-size: var(--fs-xs); margin: .2rem 0 .5rem; }
   .conflict-list .opts { display: flex; gap: 1rem; flex-wrap: wrap; }
   .conflict-list .opts label { display: flex; gap: .3rem; align-items: center; cursor: pointer; }
   .modal-actions { display: flex; gap: .75rem; justify-content: flex-end; }
 </style>
 </head>
-<body>
+<body class="page">
   <a class="back" href="{{ url_for('index') }}">&larr; Back to review queue</a>
   <h1>Import existing footage</h1>
   <p class="hint">

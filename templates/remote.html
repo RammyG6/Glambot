@@ -10,42 +10,44 @@
 <link rel="apple-touch-icon" href="/icons/180.png">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  body { max-width: 640px; margin: 0 auto; padding: 1rem 1rem 4rem; }
+  body { padding: 1rem 1rem 4rem; }
   @media (min-width: 860px) { body { max-width: 1080px; } }
-  h1 { font-size: 1.3rem; }
-  h2 { font-size: 1rem; color: var(--text-secondary); margin: 1.75rem 0 .6rem; }
+  /* Phone remote: every action is a full-size touch target. */
+  .r-actions .btn, .r-controls .btn, .r-inline .btn, .r-proj .row .btn {
+    font-size: var(--fs-md); padding: .85rem 1.3rem;
+  }
   .r-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; margin-bottom: .9rem; }
-  .r-card .who { font-size: .85rem; color: var(--text-secondary); }
+  .r-card .who { font-size: var(--fs-sm); color: var(--text-secondary); }
   .r-card .what { font-weight: 600; margin: .1rem 0 .8rem; word-break: break-word; }
-  .r-thumb { width: 100%; max-height: 130px; object-fit: cover; border-radius: 10px; background: #111; display: block; margin-bottom: .7rem; }
+  .r-thumb { width: 100%; max-height: 130px; object-fit: cover; border-radius: var(--radius-sm); background: #111; display: block; margin-bottom: .7rem; }
   .r-actions { display: flex; gap: .6rem; flex-wrap: wrap; }
-  .r-actions .btn { flex: 1 1 40%; justify-content: center; font-size: 1rem; padding: .85rem; }
+  .r-actions .btn { flex: 1 1 40%; }
   .r-inline { display: none; margin-top: .6rem; gap: .5rem; }
   .r-inline.open { display: flex; flex-wrap: wrap; }
-  .r-inline input { flex: 1 1 100%; font-size: 1rem; padding: .6rem; }
-  .r-inline .btn { flex: 1; justify-content: center; }
-  .r-controls .btn { width: 100%; justify-content: center; font-size: 1rem; padding: .85rem; margin-bottom: .6rem; }
+  .r-inline input { flex: 1 1 100%; }
+  .r-inline .btn { flex: 1; }
+  .r-controls .btn { width: 100%; margin-bottom: .6rem; }
   .r-proj { border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; margin-bottom: .9rem; }
-  .r-proj select { width: 100%; font-size: 1rem; padding: .6rem; margin: .5rem 0; }
+  .r-proj select { margin: .5rem 0; }
   .r-proj .row { display: flex; gap: .6rem; }
-  .r-proj .row .btn { flex: 1; justify-content: center; }
+  .r-proj .row .btn { flex: 1; }
   .r-proj-body { display: flex; gap: 1.2rem; flex-wrap: wrap; align-items: flex-start; margin-top: .7rem; }
   .r-proj-controls { flex: 1 1 240px; min-width: 0; }
-  .r-gallery { flex: 2 1 340px; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; background: var(--bg-elevated, transparent); }
-  .r-gallery h3 { font-size: .9rem; color: var(--text-secondary); margin: 0 0 .7rem; font-weight: 600; }
+  .r-gallery { flex: 2 1 340px; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; background: var(--bg-elevated); }
+  .r-gallery h3 { font-size: var(--fs-base); color: var(--text-secondary); margin: 0 0 .7rem; font-weight: 600; }
   .r-gallery-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: .8rem; }
   @media (max-width: 520px) { .r-gallery-grid { grid-template-columns: 1fr; } }
-  .r-gallery-grid .tile { border: 1px solid var(--border); border-radius: var(--radius-sm, 8px); padding: .5rem; cursor: pointer; text-align: center; background: none; }
-  .r-gallery-grid .tile.selected { border-color: var(--accent, #6ea8fe); background: rgba(110,168,254,0.12); }
-  .r-gallery-grid img { width: 100%; height: auto; aspect-ratio: 16 / 10; object-fit: cover; border-radius: 6px; background: #111; display: block; }
-  .r-gallery-grid .name { font-size: .8rem; color: var(--text-secondary); margin-top: .4rem; word-break: break-word; }
+  .r-gallery-grid .tile { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .5rem; cursor: pointer; text-align: center; background: none; }
+  .r-gallery-grid .tile.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .r-gallery-grid img { width: 100%; height: auto; aspect-ratio: 16 / 10; object-fit: cover; border-radius: var(--radius-sm); background: #111; display: block; }
+  .r-gallery-grid .name { font-size: var(--fs-xs); color: var(--text-secondary); margin-top: .4rem; word-break: break-word; }
   .r-gallery-more { width: 100%; margin-top: .8rem; }
   .empty { color: var(--text-secondary); }
-  .toast { position: fixed; left: 50%; bottom: 1.25rem; transform: translateX(-50%); background: var(--bg-elevated-2, #222); border: 1px solid var(--border); padding: .6rem 1rem; border-radius: 999px; font-size: .9rem; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast { position: fixed; left: 50%; bottom: 1.25rem; transform: translateX(-50%); background: var(--bg-elevated-2); border: 1px solid var(--border); padding: .6rem 1rem; border-radius: var(--radius-pill); font-size: var(--fs-base); opacity: 0; transition: opacity .2s; pointer-events: none; }
   .toast.show { opacity: 1; }
 </style>
 </head>
-<body>
+<body class="page">
   <h1>Glambot Remote</h1>
 
   <h2>Ready for review</h2>
