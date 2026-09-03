@@ -1677,9 +1677,13 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         )
         return redirect(url_for("index") + "#clips")
 
-    def _do_preview(sample_path: Path, form) -> tuple[str | None, float | None, str | None]:
-        from .processor import _resolve_ffmpeg, _probe_duration
-        from .effects import Grade, SpeedRamp, build_grade_filter, build_speed_ramp_filtergraph
+    def _do_preview(sample_path: Path, form, source_fps: float | None = None,
+                    trim_start: str | None = None, trim_end: str | None = None,
+                    ) -> tuple[str | None, float | None, str | None]:
+        from .processor import (_resolve_ffmpeg, _probe_duration, _effective_duration,
+                                _FFPROBE)
+        from .effects import (Grade, SpeedRamp, build_grade_filter,
+                              build_speed_ramp_filtergraph, build_cine_source_filter)
         ffmpeg_bin = _resolve_ffmpeg()
         if not ffmpeg_bin:
             return None, None, "ffmpeg is not available."
@@ -1688,8 +1692,25 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         advanced, err = _parse_advanced_fields(form)
         if err:
             return None, None, err
-        full_dur = _probe_duration(sample_path) or 6.0
+
+        def _fps_str(v):
+            return str(int(v)) if float(v) == int(v) else f"{float(v):g}"
+
+        # Length after the Basic-tab trim (and any raw-footage frame-rate
+        # reinterpretation) — so the preview never runs past Trim end.
+        try:
+            full_dur = _effective_duration(sample_path, trim_start, trim_end, source_fps)
+        except (OSError, ValueError):
+            full_dur = None
+        full_dur = full_dur or _probe_duration(sample_path) or 6.0
         dur = min(6.0, full_dur)
+
+        # Raw Phantom .cine: neutralise the green/flat Bayer decode before the
+        # ramp/grade chain, exactly as build_ffmpeg_cmd() does for the real render.
+        cine_fix = ""
+        if sample_path.suffix.lower() == ".cine":
+            cine_fix = build_cine_source_filter(sample_path, _FFPROBE)
+
         grade = Grade(**advanced["grade"]) if advanced["grade"] else None
         ramp = None
         if advanced["speed_ramp"]:
@@ -1698,8 +1719,11 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
                              smooth_frames=sr["smooth_frames"])
         parts = []
         src = "[0:v]"
+        if cine_fix:
+            parts.append(f"[0:v]{cine_fix}[cv]")
+            src = "[cv]"
         if ramp:
-            frag, out_label, _ = build_speed_ramp_filtergraph(ramp, "[0:v]", dur)
+            frag, out_label, _ = build_speed_ramp_filtergraph(ramp, src, dur)
             if frag:
                 parts.append(frag)
                 src = out_label
@@ -1712,9 +1736,20 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         _cleanup_previews()
         name = f"{uuid4().hex}.mp4"
         out_path = _PREVIEW_DIR / name
-        cmd = [ffmpeg_bin, "-y", "-t", f"{dur:.2f}", "-i", str(sample_path),
-               "-filter_complex", ";".join(parts), "-map", "[v]", "-an",
-               "-preset", "ultrafast", "-crf", "28", "-movflags", "+faststart", str(out_path)]
+        # -r before -i reinterprets a raw file's high capture rate; -ss before -i
+        # is a fast input seek; -t after -i caps the output length.
+        cmd = [ffmpeg_bin, "-y"]
+        if source_fps:
+            cmd += ["-r", _fps_str(source_fps)]
+        if trim_start:
+            cmd += ["-ss", trim_start]
+        cmd += ["-t", f"{dur:.2f}", "-i", str(sample_path),
+                "-filter_complex", ";".join(parts), "-map", "[v]", "-an",
+                "-preset", "ultrafast", "-crf", "28", "-movflags", "+faststart"]
+        if cine_fix:
+            cmd += ["-color_primaries", "bt709", "-color_trc", "bt709",
+                    "-colorspace", "bt709", "-color_range", "tv"]
+        cmd.append(str(out_path))
         try:
             import subprocess
             from .processor import _NO_WINDOW_FLAGS
@@ -1724,6 +1759,12 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
             return None, None, f"Preview render failed: {exc}"
         if result.returncode != 0 or not out_path.exists():
             logger.warning("Preview ffmpeg failed: %s", "\n".join(result.stderr.splitlines()[-8:]))
+            if sample_path.suffix.lower() in (".cine", ".braw"):
+                return None, None, (
+                    f"Couldn't decode this {sample_path.suffix.lower()} file — it needs a "
+                    "specially-built ffmpeg with the camera SDK (see README). The main "
+                    "pipeline fails the same way for this file."
+                )
             return None, None, "Preview render failed."
         return name, full_dur, None
 
@@ -1744,16 +1785,18 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
                 break
         else:
             return jsonify({"ok": False, "error": "Sample clip not found."}), 400
-        name, duration, err = _do_preview(sample_path, request.form)
-        if err:
-            return jsonify({"ok": False, "error": err}), 400
         from .processor import _effective_source_fps
         try:
             _cfg = load_config(project_dir)
             trim = _cfg.trim_for(target)
             src_fps = _effective_source_fps(sample_path, _cfg.source_fps)
         except ConfigError:
-            trim, src_fps = None, None
+            trim, src_fps = None, _effective_source_fps(sample_path, None)
+        name, duration, err = _do_preview(
+            sample_path, request.form, source_fps=src_fps,
+            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None))
+        if err:
+            return jsonify({"ok": False, "error": err}), 400
         return jsonify({"ok": True, "url": url_for("serve_preview", project=project, name=name),
                         "duration": _trimmed_preview_duration(sample_path, trim, duration, src_fps)})
 
@@ -1768,13 +1811,16 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
             return jsonify({"ok": False, "error": str(exc)}), 400
         from .processor import _resolve_source, _effective_source_fps
         sample_path = _resolve_source(job, config)
-        name, duration, err = _do_preview(sample_path, request.form)
+        trim = config.trim_for(job.filename)
+        src_fps = _effective_source_fps(sample_path, config.source_fps)
+        name, duration, err = _do_preview(
+            sample_path, request.form, source_fps=src_fps,
+            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None))
         if err:
             return jsonify({"ok": False, "error": err}), 400
         return jsonify({"ok": True, "url": url_for("serve_preview", project=job.project, name=name),
                         "duration": _trimmed_preview_duration(
-                            sample_path, config.trim_for(job.filename), duration,
-                            _effective_source_fps(sample_path, config.source_fps))})
+                            sample_path, trim, duration, src_fps)})
 
     @app.get("/projects/<project>/preview/<name>")
     def serve_preview(project, name):
