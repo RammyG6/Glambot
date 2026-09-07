@@ -136,8 +136,9 @@ soundtracks/
 - `auto_deliver` / `lan_delivery` / `offline_mode` (all optional booleans, at
   most one true): the project's **Mode**. The New Project form presents these
   as one exclusive radio — Standard / Fully automatic / Local Wi-Fi link /
-  Fully offline. `download_pin` (4–8 digits) is required for the Wi-Fi and
-  offline modes — see "Offline LAN delivery" below.
+  Fully offline. `download_pin` (4–8 digits) is optional for the Wi-Fi and
+  offline modes — leave it blank for no-password guest downloads. See
+  "Offline LAN delivery" below.
 - `grade` (optional, `{ "exposure": 0.0, "contrast": 1.0, "white_balance": 0 }`):
   exposure in stops (-2..2), contrast (0.5..2), white balance (-100 warm ..
   100 cool). Applied to every clip. See "Advanced editing".
@@ -298,18 +299,53 @@ Hotspot). On the project form:
   `http://<this-pc-lan-ip>:<port>/d/<token>`.
 - **Fully offline — skip Google Drive entirely** (`offline_mode`) — no upload
   at all; the Wi-Fi link is the only delivery.
-- **Guest download PIN** (`download_pin`, 4–8 digits) — guests type this before
-  downloading. Print it on the QR card. Required for either option above.
+- **Guest download PIN** (`download_pin`, 4–8 digits) — optional. When set,
+  guests type it before downloading (print it on the QR card). Leave it blank
+  and the download page / gallery open with no PIN prompt.
 
 Guests get a per-clip page (`/d/<token>`) and an event gallery
-(`/g/<project>`), both behind the PIN. If `LAN_SSID` / `LAN_PASSWORD` are set
+(`/g/<project>`), behind the PIN when one is set. If `LAN_SSID` / `LAN_PASSWORD` are set
 in `.env`, the kiosk screen and delivery photo also show a **"Join Wi-Fi" QR**
 next to the download QR. (A single QR can carry a Wi-Fi-join string *or* a URL,
 never both, and a web page cannot control the phone's Wi-Fi — so "join, then
 download" is two QR codes, not one.)
 
+Once a guest has fully downloaded a clip, their page shows **"Download Complete"**
+and the operator's Clips tab shows the same on that clip's row, with a `(N)`
+count once it has been downloaded more than once.
+
 To serve guests you must set `BIND_HOST=0.0.0.0` and `GLAMBOT_PIN` in `.env` —
 see WINDOWS_SETUP.md.
+
+#### One-scan joining (router captive portal)
+
+By default guests scan two QRs: the **Join-Wi-Fi QR** once on arrival (shown on
+the kiosk screen and every delivery photo), then one QR per clip.
+
+To collapse that to a single scan you need a **captive portal** on the network
+the guest joins — so joining the Wi-Fi auto-opens Glambot's landing page,
+**`http://<pc-lan-ip>:<port>/welcome`** (redirects to the running event's
+gallery; a short chooser if more than one LAN/offline project exists). Glambot
+can't do this itself (the PC is a client, not the gateway); it's a router
+setting.
+
+- **ASUS with Guest Network Pro / "Free Wi-Fi" / Captive Portal**: enable a
+  guest network for the event SSID with **Access Intranet = Enable**, turn on
+  the captive portal, and set its redirect/landing URL to
+  `http://<pc-lan-ip>:<port>/welcome`. Reserve the PC's IP in
+  **LAN → DHCP Server → Manually Assigned IP**.
+- **Older ASUS (e.g. RT-AC58U) with no captive-portal option**: the router
+  can't do it. Either stay on the two-QR method above, or add a small **GL.iNet
+  travel router** as the guest access point — it runs OpenWrt with a built-in
+  captive portal you point at `/welcome`.
+
+Full step-by-step (with troubleshooting and the GL.iNet fallback):
+[`docs/captive-portal.md`](docs/captive-portal.md).
+
+Note: the captive-portal pop-up on iOS/Android is a cut-down browser. It shows
+the gallery fine, but for the actual video download the guest may need to tap
+**"Open in Safari / Chrome"**. This removes the second *scan*, not always the
+extra tap.
 
 ### Control from an iPad
 

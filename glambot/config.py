@@ -637,11 +637,9 @@ def load_config(project_dir: Path) -> ProjectConfig:
             raise ConfigError(
                 f"{project_dir.name}/config.json: 'download_pin' must be 4-8 digits, got {download_pin!r}"
             )
-    if (lan_delivery or offline_mode) and not download_pin:
-        raise ConfigError(
-            f"{project_dir.name}/config.json: 'download_pin' (4-8 digits) is required when "
-            f"lan_delivery or offline_mode is enabled"
-        )
+    # A download_pin is optional for lan_delivery / offline_mode. When absent,
+    # the guest download page and gallery are served without a PIN prompt
+    # (see glambot/guest.py).
 
     # --- Advanced editing: colour grade + speed ramp ------------------
     grade = _parse_grade(data.get("grade"), "grade", project_dir)

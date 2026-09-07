@@ -40,6 +40,7 @@ from .drive import DriveError
 from .emailer import EmailError, load_default_template, resolve_placeholders, send_delivery_email
 from .folders import all_project_dirs, group_by_folder, project_watch_dirs
 from .ftp_import import load_ftp_settings, parse_passive_ports, save_ftp_settings
+from .phantom_import import load_phantom_settings, save_phantom_settings
 from . import lan, nativeui
 from .processor import cancel_job, content_hash, is_footage_file
 from .qr import make_qr_data_uri, make_wifi_qr_data_uri
@@ -115,7 +116,8 @@ def _resolve_output_footage(project_dir: Path) -> Path | None:
         return None
 
 
-def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_server=None) -> Flask:
+def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_server=None,
+               phantom_server=None) -> Flask:
     app = Flask(
         __name__,
         template_folder=str(_REPO_ROOT / "templates"),
@@ -125,6 +127,7 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
     app.config["INBOX_DIR"] = Path(inbox_dir)
     app.config["STORE"] = store
     app.config["FTP_SERVER"] = ftp_server
+    app.config["PHANTOM_SERVER"] = phantom_server
 
     from .auth import init_auth
     init_auth(app)
@@ -320,6 +323,18 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
                 for j in jobs
             ],
         })
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.get("/downloads.json")
+    def downloads_json():
+        """{job_id: completed-download count} for every delivered guest clip -
+        polled by the Clips tab so the "Download Complete" badges stay live."""
+        out = {
+            str(j.id): j.lan_download_count
+            for j in store.list_jobs(status="sent") if j.download_token
+        }
+        resp = jsonify(out)
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
@@ -596,6 +611,197 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         except OSError as exc:
             flash(f"Could not open the folder: {exc}", "error")
         return redirect(url_for("ftp_import_page"))
+
+    # ---- Phantom camera import: pull .cine takes off a VEO ----------
+
+    def _phantom():
+        return app.config.get("PHANTOM_SERVER")
+
+    def _phantom_local_only() -> bool:
+        return (request.remote_addr or "") in {"127.0.0.1", "::1", "localhost"}
+
+    @app.get("/phantom-import")
+    def phantom_import_page():
+        settings = load_phantom_settings(app.config["INBOX_DIR"])
+        server = _phantom()
+        status = server.status() if server is not None else {"running": False}
+        dest = str(settings["dest_dir"]).strip()
+        return render_template(
+            "phantom_import.html", settings=settings, status=status,
+            available=server is not None,
+            dest_exists=bool(dest) and Path(dest).is_dir(),
+        )
+
+    @app.get("/phantom-import/status.json")
+    def phantom_import_status():
+        server = _phantom()
+        if server is None:
+            resp = jsonify({"running": False, "available": False})
+        else:
+            resp = jsonify({"available": True, **server.status()})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.get("/phantom-import/camera.json")
+    def phantom_import_camera():
+        server = _phantom()
+        if server is None:
+            resp = jsonify({"available": False})
+        else:
+            resp = jsonify({"available": True, **server.camera_json()})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.get("/phantom-import/port-owner")
+    def phantom_import_port_owner():
+        """Chataigne polls this: 'chataigne' = safe to hold TCP 7115,
+        'glambot' = disconnect now, Glambot needs the camera."""
+        server = _phantom()
+        owner = server.port_owner if server is not None else "chataigne"
+        resp = jsonify({"owner": owner})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.post("/phantom-import/take-complete")
+    def phantom_import_take_complete():
+        """Chataigne calls this right after it sends `trig` and sees `STR`."""
+        server = _phantom()
+        if server is None or not server.running:
+            return jsonify({"ok": False, "error": "phantom import not running"}), 503
+        data = request.get_json(silent=True) or request.form
+        partition = data.get("partition")
+        server.note_take_complete(partition)
+        return jsonify({"ok": True})
+
+    @app.post("/phantom-import/settings")
+    def phantom_import_save():
+        inbox_dir = app.config["INBOX_DIR"]
+        form = request.form
+        dest_dir = form.get("dest_dir", "").strip().strip('"').strip("'")
+        if not dest_dir:
+            flash("A download folder is required.", "error")
+            return redirect(url_for("phantom_import_page"))
+        try:
+            partition_count = max(1, int(form.get("partition_count", "4")))
+        except ValueError:
+            flash("Partition count must be a number.", "error")
+            return redirect(url_for("phantom_import_page"))
+        settings = save_phantom_settings(inbox_dir, {
+            "camera_ip": form.get("camera_ip", "").strip(),
+            "camera_serial": form.get("camera_serial", "").strip(),
+            "partition_count": partition_count,
+            "file_type": form.get("file_type", "SVV_RAWCINE").strip() or "SVV_RAWCINE",
+            "dest_dir": dest_dir,
+            "delete_after_import": form.get("delete_after_import") == "on",
+            "handoff_mode": form.get("handoff_mode", "notify").strip() or "notify",
+            "handoff_notify_url": form.get("handoff_notify_url", "").strip(),
+            "poll_seconds": int(form.get("poll_seconds") or 5) if str(form.get("poll_seconds") or "5").isdigit() else 5,
+        })
+        server = _phantom()
+        if server is not None and server.running:
+            err = server.restart(settings)
+            flash(f"Saved, but restart failed: {err}" if err else "Saved and reconnected.",
+                  "error" if err else "info")
+        else:
+            flash("Phantom import settings saved.", "info")
+        return redirect(url_for("phantom_import_page"))
+
+    @app.post("/phantom-import/camera/settings")
+    def phantom_import_camera_settings():
+        server = _phantom()
+        if server is None or not server.running:
+            return jsonify({"ok": False, "error": "phantom import not running"}), 503
+        fields = request.get_json(silent=True) or {k: v for k, v in request.form.items()}
+        result = server.queue_settings(fields)
+        return jsonify({"ok": True, **result})
+
+    @app.post("/phantom-import/quick-settings")
+    def phantom_import_quick_settings():
+        """Persist which live-camera fields the quick-settings card shows.
+        Display-only preference - never restarts the server."""
+        data = request.get_json(silent=True) or {}
+        fields = data.get("fields") if isinstance(data, dict) else None
+        fields = [str(f) for f in fields if str(f)] if isinstance(fields, list) else []
+        save_phantom_settings(app.config["INBOX_DIR"], {"quick_settings": fields})
+        server = _phantom()
+        if server is not None:
+            server.set_quick_settings(fields)
+        return jsonify({"ok": True, "quick_settings": fields})
+
+    @app.post("/phantom-import/download-mode")
+    def phantom_import_download_mode():
+        """Toggle auto vs. manual download - applies live, no restart."""
+        data = request.get_json(silent=True) or request.form
+        auto = str(data.get("auto")).lower() in {"1", "true", "on", "yes"}
+        save_phantom_settings(app.config["INBOX_DIR"], {"auto_download": auto})
+        server = _phantom()
+        if server is not None:
+            server.set_auto_download(auto)
+        return jsonify({"ok": True, "auto_download": auto})
+
+    @app.post("/phantom-import/dest/create")
+    def phantom_import_create_dest():
+        settings = load_phantom_settings(app.config["INBOX_DIR"])
+        try:
+            Path(settings["dest_dir"]).mkdir(parents=True, exist_ok=True)
+            flash(f"Created {settings['dest_dir']}.", "info")
+        except OSError as exc:
+            flash(f"Could not create that folder: {exc}", "error")
+        return redirect(url_for("phantom_import_page"))
+
+    @app.post("/phantom-import/start")
+    def phantom_import_start():
+        inbox_dir = app.config["INBOX_DIR"]
+        server = _phantom()
+        if server is None:
+            flash("The camera bridge component isn't available in this build.", "error")
+            return redirect(url_for("phantom_import_page"))
+        settings = save_phantom_settings(inbox_dir, {"enabled": True})
+        err = server.start(settings)
+        if err:
+            save_phantom_settings(inbox_dir, {"enabled": False})
+            flash(f"Could not start: {err}", "error")
+        else:
+            flash("Phantom import started.", "info")
+        return redirect(url_for("phantom_import_page"))
+
+    @app.post("/phantom-import/stop")
+    def phantom_import_stop():
+        save_phantom_settings(app.config["INBOX_DIR"], {"enabled": False})
+        server = _phantom()
+        if server is not None:
+            server.stop()
+        flash("Phantom import stopped.", "info")
+        return redirect(url_for("phantom_import_page"))
+
+    @app.post("/phantom-import/download-now")
+    def phantom_import_download_now():
+        server = _phantom()
+        if server is None or not server.running:
+            flash("Phantom import isn't running.", "error")
+            return redirect(url_for("phantom_import_page"))
+        server.download_now()
+        flash("Download requested - it runs on the next port handoff.", "info")
+        return redirect(url_for("phantom_import_page"))
+
+    @app.post("/phantom-import/open-folder")
+    def phantom_import_open_folder():
+        if not _phantom_local_only():
+            flash("The folder can only be opened on the Glambot PC.", "error")
+            return redirect(url_for("phantom_import_page"))
+        dest = Path(load_phantom_settings(app.config["INBOX_DIR"])["dest_dir"])
+        if not dest.is_dir():
+            flash(f"That folder doesn't exist: {dest}", "error")
+            return redirect(url_for("phantom_import_page"))
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(dest))  # noqa: S606
+            else:
+                import subprocess
+                subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", str(dest)], check=False)
+        except OSError as exc:
+            flash(f"Could not open the folder: {exc}", "error")
+        return redirect(url_for("phantom_import_page"))
 
     @app.post("/pick")
     def pick():
@@ -2191,15 +2397,19 @@ def _compute_project_groups(inbox_dir: Path, store: JobStore) -> list[dict]:
             errors[name] = str(exc)
             groups.setdefault(project_dir, []).append(name)
 
-    # Guest-download PIN per project (for the Projects tab), best-effort.
+    # Guest download: which projects expose a guest gallery, and the PIN for
+    # those that have one (for the Projects tab), best-effort.
     guest_pins: dict[str, str] = {}
+    guest_galleries: set[str] = set()
     for project_dir in all_project_dirs(inbox_dir):
         try:
             cfg = load_config(project_dir)
         except ConfigError:
             continue
-        if (cfg.lan_delivery or cfg.offline_mode) and cfg.download_pin:
-            guest_pins[project_dir.name] = cfg.download_pin
+        if cfg.lan_delivery or cfg.offline_mode:
+            guest_galleries.add(project_dir.name)
+            if cfg.download_pin:
+                guest_pins[project_dir.name] = cfg.download_pin
 
     result = []
     for folder, projects in groups.items():
@@ -2212,6 +2422,7 @@ def _compute_project_groups(inbox_dir: Path, store: JobStore) -> list[dict]:
             "active": active,
             "errors": errors,
             "guest_pins": guest_pins,
+            "guest_galleries": guest_galleries,
         })
     return sorted(result, key=lambda g: g["folder"])
 
@@ -2874,9 +3085,11 @@ def _parse_project_form(req):
     auto_deliver = mode == "auto"
     lan_delivery = mode == "lan"
     offline_mode = mode == "offline"
+    # The guest download PIN is optional for the Wi-Fi / offline modes: blank
+    # means guests download with no PIN prompt. Only the format is enforced.
     download_pin = form.get("download_pin", "").strip() or None
-    if mode in {"lan", "offline"} and not (download_pin and re.match(r"^\d{4,8}$", download_pin)):
-        return None, "A 4-8 digit guest download PIN is required for the Wi-Fi / offline modes."
+    if download_pin and not re.match(r"^\d{4,8}$", download_pin):
+        return None, "The guest download PIN must be 4-8 digits (or leave it blank)."
 
     # --- Soundtrack ---------------------------------------------------
     soundtrack_choice = form.get("soundtrack_choice", "")

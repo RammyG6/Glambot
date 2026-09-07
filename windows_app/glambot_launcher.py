@@ -92,6 +92,7 @@ def main() -> None:
     from glambot.app import create_app
     from glambot.db import JobStore
     from glambot.ftp_import import FtpImportServer, load_ftp_settings
+    from glambot.phantom_import import PhantomImportServer, load_phantom_settings
     from glambot.processor import stop_all_active
     from glambot.watcher import InboxWatcher
 
@@ -119,7 +120,13 @@ def main() -> None:
         if err:
             logging.warning("FTP import server not started: %s", err)
 
-    app = create_app(inbox_dir, store, watcher, ftp_server)
+    phantom_server = PhantomImportServer(inbox_dir, watcher)
+    if load_phantom_settings(inbox_dir).get("enabled"):
+        err = phantom_server.start()
+        if err:
+            logging.warning("Phantom import not started: %s", err)
+
+    app = create_app(inbox_dir, store, watcher, ftp_server, phantom_server)
 
     server_thread = threading.Thread(
         target=lambda: app.run(host=bind_host, port=port, debug=False, use_reloader=False),
@@ -143,10 +150,10 @@ def main() -> None:
             f"Check the log for details:\n{log_path}"
         )
 
-    _run_gui(url, watcher, log_path, ftp_server)
+    _run_gui(url, watcher, log_path, ftp_server, phantom_server)
 
 
-def _run_gui(url: str, watcher, log_path: Path, ftp_server=None) -> None:
+def _run_gui(url: str, watcher, log_path: Path, ftp_server=None, phantom_server=None) -> None:
     import webview
     import pystray
     from PIL import Image
@@ -178,6 +185,11 @@ def _run_gui(url: str, watcher, log_path: Path, ftp_server=None) -> None:
                 ftp_server.stop()
         except Exception:
             logging.exception("Error stopping FTP import server")
+        try:
+            if phantom_server is not None:
+                phantom_server.stop()
+        except Exception:
+            logging.exception("Error stopping Phantom import")
         try:
             tray_icon.stop()
         except Exception:

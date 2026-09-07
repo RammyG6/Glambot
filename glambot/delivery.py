@@ -65,7 +65,7 @@ def deliver(job: Job, config: ProjectConfig, store: JobStore, inbox_dir: Path, *
     # resolve to the same stable URL on re-delivery.
     lan_link = None
     token = job.download_token
-    if (config.lan_delivery or config.offline_mode) and config.download_pin:
+    if config.lan_delivery or config.offline_mode:
         if not token:
             token = lan.mint_download_token()
             store.update_job(job.id, download_token=token)

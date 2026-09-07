@@ -378,6 +378,9 @@
                   {% else %}
                     <span class="item">Sent {{ job.sent_at }}</span>
                   {% endif %}
+                  <span class="item dl-status" data-id="{{ job.id }}"{% if not job.lan_download_count %} hidden{% endif %}>
+                    &#10003; Download Complete{% if job.lan_download_count > 1 %} ({{ job.lan_download_count }}){% endif %}
+                  </span>
                   {% if job.drive_link %}
                     <a class="link-out" href="{{ job.drive_link }}" target="_blank" rel="noopener">
                       Drive link
@@ -479,8 +482,8 @@
                       <a href="{{ url_for('playback_reel', project=p) }}" target="_blank" rel="noopener">
                         Playback reel <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg>
                       </a>
-                      {% if pg.guest_pins.get(p) %}
-                        <a href="{{ url_for('guest.gallery', project=p) }}" target="_blank" rel="noopener">Guest gallery (PIN {{ pg.guest_pins[p] }})</a>
+                      {% if p in pg.guest_galleries %}
+                        <a href="{{ url_for('guest.gallery', project=p) }}" target="_blank" rel="noopener">Guest gallery {% if pg.guest_pins.get(p) %}(PIN {{ pg.guest_pins[p] }}){% else %}(no PIN){% endif %}</a>
                       {% endif %}
                       <a href="{{ url_for('edit_project_form', project=p) }}" target="_blank" rel="noopener">Edit settings</a>
                       <a href="{{ url_for('import_footage_form', project=p) }}" target="_blank" rel="noopener">Import existing footage</a>
@@ -697,6 +700,26 @@
       }).catch(function () {});
     }
     setInterval(poll, 1000);
+    poll();
+  })();
+
+  // ---- Live "Download Complete (N)" badges on delivered clips. ----
+  (function () {
+    var badges = document.querySelectorAll('.dl-status');
+    if (!badges.length) return;
+    function paint(map) {
+      badges.forEach(function (el) {
+        var n = map[el.dataset.id];
+        if (n == null || n < 1) return;
+        el.innerHTML = '&#10003; Download Complete' + (n > 1 ? ' (' + n + ')' : '');
+        el.hidden = false;
+      });
+    }
+    function poll() {
+      fetch('/downloads.json', { cache: 'no-store' })
+        .then(function (r) { return r.json(); }).then(paint).catch(function () {});
+    }
+    setInterval(poll, 5000);
     poll();
   })();
 </script>

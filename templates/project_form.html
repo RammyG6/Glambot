@@ -150,9 +150,9 @@
           <input type="email" id="recipient_email" name="recipient_email" value="{{ values.get('recipient_email', '') }}">
 
           <div id="downloadPinRow">
-            <label for="download_pin">Guest download PIN</label>
+            <label for="download_pin">Guest download PIN <span class="muted">(optional)</span></label>
             <input type="text" id="download_pin" name="download_pin" inputmode="numeric" pattern="\d{4,8}" placeholder="e.g. 4821" value="{{ values.get('download_pin', '') }}">
-            <p class="hint">4-8 digits, for the Wi-Fi / offline modes. Guests type this before downloading; print it on the QR card.</p>
+            <p class="hint">4-8 digits. Leave blank and guests download with no password prompt. If set, guests type it before downloading &mdash; print it on the QR card.</p>
           </div>
         </fieldset>
 
@@ -455,8 +455,8 @@
   const MODE_HINTS = {
     standard: 'Clips wait for a per-clip Approve click.',
     auto: 'Clips upload and deliver automatically as soon as they are processed — no Approve click. For kiosk QR, open the project’s /kiosk page on a venue monitor.',
-    lan: 'Adds a guest download page served straight from this PC (QR points at its LAN address), alongside Google Drive.',
-    offline: 'No internet: nothing is uploaded to Google Drive. The Wi-Fi download link is the only delivery.',
+    lan: 'Adds a guest download page served straight from this PC (QR points at its LAN address), alongside Google Drive. Set a guest PIN below, or leave it blank for no-password downloads.',
+    offline: 'No internet: nothing is uploaded to Google Drive. The Wi-Fi download link is the only delivery. Set a guest PIN below, or leave it blank for no-password downloads.',
   };
   function currentMode() {
     let v = 'standard';

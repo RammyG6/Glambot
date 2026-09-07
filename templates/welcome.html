@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Your videos</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  body { padding: 1.5rem 1.25rem 3rem; }
+  .muted { color: var(--text-secondary); font-size: var(--fs-base); }
+  .welcome-btn { margin: .75rem 0; }
+</style>
+</head>
+<body class="page-narrow">
+{% if projects %}
+  <h1>Your videos</h1>
+  <p class="muted">Pick your event to see and download your clips.</p>
+  {% for p in projects %}
+    <a class="btn btn-primary btn-lg btn-block welcome-btn"
+       href="{{ url_for('guest.gallery', project=p) }}">{{ p }}</a>
+  {% endfor %}
+{% else %}
+  <h1>No event is running right now</h1>
+  <p class="muted">Check with the booth staff &mdash; your videos will appear here once the event is set up.</p>
+{% endif %}
+</body>
+</html>

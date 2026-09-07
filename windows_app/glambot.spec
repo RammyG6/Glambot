@@ -48,6 +48,15 @@ datas += [
     (str(WINDOWS_APP_DIR / "vendor" / "ffprobe.exe"), "vendor"),
 ]
 
+# The Phantom camera bridge runs under its own embedded Python 3.11 (the
+# pyphantom wheel's PhPy.pyd links python311.dll). Ship the whole folder -
+# bridge.py plus camera_bridge/runtime/ (build that venv before PyInstaller).
+# glambot/phantom_bridge_client.py resolves it relative to the repo root, i.e.
+# next to the frozen exe. Skipped gracefully if runtime/ is absent.
+_camera_bridge = REPO_ROOT / "camera_bridge"
+if _camera_bridge.is_dir():
+    datas += [(str(_camera_bridge), "camera_bridge")]
+
 a = Analysis(
     [str(WINDOWS_APP_DIR / "glambot_launcher.py")],
     pathex=[str(REPO_ROOT)],

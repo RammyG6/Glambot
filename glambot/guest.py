@@ -1,10 +1,13 @@
 """Guest-facing download pages, served over the LAN when there's no internet.
 
-Two entry points, both gated by the project's own `download_pin` (4-8 digits,
-printed on the QR card) - never the operator PIN:
+Two entry points:
 
   /d/<token>     one clip, reached by scanning that clip's QR code
   /g/<project>   a gallery of every delivered clip for the project
+
+Both are gated by the project's own `download_pin` (4-8 digits, printed on the
+QR card) - never the operator PIN. The PIN is optional: a project with no
+`download_pin` serves these pages directly, with no unlock step.
 
 The operator UI's `before_request` hook (glambot/auth.py) sees
 `request.blueprint == "guest"` and steps aside, leaving enforcement to this
@@ -12,6 +15,7 @@ module.
 """
 from __future__ import annotations
 
+import os
 import re
 import time
 
@@ -19,6 +23,7 @@ from flask import (
     Blueprint,
     abort,
     current_app,
+    jsonify,
     redirect,
     render_template,
     request,
@@ -70,8 +75,10 @@ def _project_config(project: str):
         abort(404)
 
 
-def _unlocked(project: str) -> bool:
-    return session.get(f"guest:{project}") is True
+def _guest_ok(project: str, config) -> bool:
+    """True when the guest may see this project's clips: either the project has
+    no download PIN, or the visitor has entered it this session."""
+    return not config.download_pin or session.get(f"guest:{project}") is True
 
 
 def _job_for_token(token: str):
@@ -85,17 +92,18 @@ def _job_for_token(token: str):
 def download_page(token):
     job = _job_for_token(token)
     config = _project_config(job.project)
-    if not config.download_pin:
-        abort(404)
-    if not _unlocked(job.project):
-        return render_template("guest_download.html", token=token, job=job, locked=True, error=None)
-    return render_template("guest_download.html", token=token, job=job, locked=False, error=None)
+    locked = not _guest_ok(job.project, config)
+    return render_template("guest_download.html", token=token, job=job, locked=locked,
+                           error=None, downloads=job.lan_download_count)
 
 
 @guest_bp.post("/d/<token>/unlock")
 def unlock(token):
     job = _job_for_token(token)
     config = _project_config(job.project)
+    if not config.download_pin:
+        # Nothing to unlock - the page is open.
+        return redirect(url_for("guest.download_page", token=token))
     ip = request.remote_addr or "?"
     if _rate_limited(ip):
         return render_template("guest_download.html", token=token, job=job, locked=True,
@@ -112,21 +120,51 @@ def unlock(token):
 @guest_bp.get("/d/<token>/file")
 def download_file(token):
     job = _job_for_token(token)
-    _project_config(job.project)
-    if not _unlocked(job.project):
+    config = _project_config(job.project)
+    if not _guest_ok(job.project, config):
         abort(403)
     if not job.output_path:
         abort(404)
-    _store().bump_lan_download(job.id)
     name = f"{job.project}_{job.filename}".rsplit(".", 1)[0] + ".mp4"
-    return send_file(job.output_path, as_attachment=True, download_name=name, conditional=True)
+    resp = send_file(job.output_path, as_attachment=True, download_name=name, conditional=True)
+    # Count a download only once the whole file has actually reached the guest:
+    # a full 200 response whose every byte we streamed out. Range requests (206,
+    # video scrubbing) and aborted transfers never satisfy `sent >= total`.
+    if resp.status_code == 200:
+        total = os.path.getsize(job.output_path)
+        src = resp.response
+        store, job_id = _store(), job.id
+
+        def _tally():
+            sent = 0
+            try:
+                for chunk in src:
+                    sent += len(chunk)
+                    yield chunk
+            finally:
+                if sent >= total:
+                    store.bump_lan_download(job_id)
+
+        resp.response = _tally()
+        resp.direct_passthrough = True
+    return resp
+
+
+@guest_bp.get("/d/<token>/status")
+def download_status(token):
+    """Polled by the guest's own page to flip to "Download Complete"."""
+    job = _job_for_token(token)
+    config = _project_config(job.project)
+    if not _guest_ok(job.project, config):
+        abort(403)
+    return jsonify({"downloads": job.lan_download_count})
 
 
 @guest_bp.get("/d/<token>/stream")
 def download_stream(token):
     job = _job_for_token(token)
-    _project_config(job.project)
-    if not _unlocked(job.project):
+    config = _project_config(job.project)
+    if not _guest_ok(job.project, config):
         abort(403)
     if not job.output_path:
         abort(404)
@@ -136,10 +174,8 @@ def download_stream(token):
 @guest_bp.route("/g/<project>", methods=["GET", "POST"])
 def gallery(project):
     config = _project_config(project)
-    if not config.download_pin:
-        abort(404)
     error = None
-    if request.method == "POST":
+    if config.download_pin and request.method == "POST":
         ip = request.remote_addr or "?"
         if _rate_limited(ip):
             error = "Too many attempts. Wait a few minutes and try again."
@@ -150,7 +186,7 @@ def gallery(project):
                 session.permanent = True
                 return redirect(url_for("guest.gallery", project=project))
             error = "Wrong PIN."
-    if not _unlocked(project):
+    if not _guest_ok(project, config):
         return render_template("guest_gallery.html", project=project, locked=True,
                                error=error, clips=[]), (401 if error else 200)
     clips = [
@@ -162,10 +198,35 @@ def gallery(project):
 
 @guest_bp.get("/g/<project>/thumb/<int:job_id>")
 def gallery_thumb(project, job_id):
-    _project_config(project)
-    if not _unlocked(project):
+    config = _project_config(project)
+    if not _guest_ok(project, config):
         abort(403)
     job = _store().get_job(job_id)
     if job is None or job.project != project or not job.thumbnail_path:
         abort(404)
     return send_file(job.thumbnail_path, conditional=True)
+
+
+@guest_bp.get("/welcome")
+def welcome():
+    """Captive-portal landing page. The venue router redirects a freshly-joined
+    guest here; we send them on to the event gallery. One gallery -> straight
+    through; several -> a small chooser; none -> a friendly notice."""
+    inbox = _inbox_dir()
+    names: list[str] = []
+    try:
+        entries = sorted(p for p in inbox.iterdir() if p.is_dir())
+    except OSError:
+        entries = []
+    for d in entries:
+        if not (d / "config.json").exists():
+            continue
+        try:
+            cfg = load_config(d)
+        except ConfigError:
+            continue
+        if cfg.lan_delivery or cfg.offline_mode:
+            names.append(d.name)
+    if len(names) == 1:
+        return redirect(url_for("guest.gallery", project=names[0]))
+    return render_template("welcome.html", projects=names)

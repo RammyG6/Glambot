@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from .app import create_app
 from .db import JobStore
 from .ftp_import import FtpImportServer, load_ftp_settings
+from .phantom_import import PhantomImportServer, load_phantom_settings
 from .watcher import InboxWatcher
 
 
@@ -54,12 +55,19 @@ def main() -> None:
         if err:
             logging.getLogger(__name__).warning("FTP import server not started: %s", err)
 
-    app = create_app(inbox_dir, store, watcher, ftp_server)
+    phantom_server = PhantomImportServer(inbox_dir, watcher)
+    if load_phantom_settings(inbox_dir).get("enabled"):
+        err = phantom_server.start()
+        if err:
+            logging.getLogger(__name__).warning("Phantom import not started: %s", err)
+
+    app = create_app(inbox_dir, store, watcher, ftp_server, phantom_server)
     try:
         app.run(host=bind_host, port=port, debug=False, use_reloader=False)
     finally:
         watcher.stop()
         ftp_server.stop()
+        phantom_server.stop()
 
 
 def _warn_if_exposed_without_pin(bind_host: str) -> None:
