@@ -12,6 +12,7 @@ import math
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -294,26 +295,99 @@ def build_grade_filter(grade: Grade | None, ffmpeg_bin: str) -> str:
 # This camera reports no log mode (gsSupportsLogMode = 0), so nothing in the
 # .cine tells us what Phantom's curves would look like; don't present these as
 # matching PCC.
-# NB on direction: ffmpeg's `eq` applies output = input^(1/gamma), so a *higher*
-# gamma lifts shadows. A flat/log look wants lifted blacks and reduced contrast,
-# hence gamma above 2.2 on the log variants, not below - the reverse crushes the
-# shadows it is supposed to protect.
-_CINE_PROFILES = {
-    "rec709": "eq=gamma=2.2",
-    "log1": "eq=gamma=2.6:contrast=0.85:brightness=0.03",
-    "log2": "eq=gamma=3.0:contrast=0.70:brightness=0.06",
-}
+LOOK_SUFFIX = ".look.json"
 
 
-def build_cine_source_filter(input_path, ffprobe_bin: str, profile: str = "rec709") -> str:
-    """Neutralise raw Phantom `.cine` colour: ffmpeg debayers the Bayer sensor
-    data but ignores the camera's embedded white-balance gains and gamma, so
-    the frame comes out green and flat. Read those tags and apply them.
+def load_cine_look(input_path) -> dict | None:
+    """The camera's colour description, written beside the clip at import time
+    by the Phantom importer (`<clip>.look.json`). None when there isn't one."""
+    try:
+        path = Path(str(input_path)).with_suffix("")
+        sidecar = Path(str(path) + LOOK_SUFFIX)
+        if not sidecar.exists():
+            sidecar = Path(str(input_path) + LOOK_SUFFIX)
+        if not sidecar.exists():
+            return None
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        return data.get("look") if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        logger.warning("could not read the colour sidecar for %s", input_path)
+        return None
 
-    Returns a comma-chained fragment (no pad labels) to prepend to `[0:v]`,
-    or "" if the file has no `wbgain` tags (i.e. it isn't raw Phantom footage).
-    `profile` picks the base tone curve; the operator fine-tunes on top with the
-    exposure / contrast / white-balance grade, which composes after this."""
+
+def _tone_curve_filter(tone: dict | None) -> str:
+    """The camera's tone curve as an ffmpeg `curves` filter.
+
+    This is the LUT the camera records (TONEDESC: control points in 0..1). It
+    *replaces* the gamma rather than stacking with it - applying both blows the
+    picture out, which is verifiable on any clip.
+    """
+    pts = (tone or {}).get("points") or []
+    clean: list[tuple[float, float]] = []
+    for pair in pts:
+        try:
+            x, y = float(pair[0]), float(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if 0.0 < x < 1.0:
+            clean.append((x, y))
+    if not clean:
+        return ""
+    clean.sort()
+    # curves needs the endpoints; duplicates on x make it reject the whole set.
+    full = [(0.0, 0.0)] + clean + [(1.0, 1.0)]
+    seen, uniq = set(), []
+    for x, y in full:
+        key = round(x, 6)
+        if key not in seen:
+            seen.add(key)
+            uniq.append((x, y))
+    return "curves=all='" + " ".join(f"{x:g}/{y:g}" for x, y in uniq) + "'"
+
+
+def build_cine_source_filter(input_path, ffprobe_bin: str, look: dict | None = None) -> str:
+    """Reproduce the camera's own colour for a raw Phantom `.cine`.
+
+    ffmpeg debayers the Bayer data but knows nothing about the camera's
+    processing description, most of which isn't even exposed to ffprobe. When a
+    `.look.json` sidecar is present we apply what the camera actually recorded:
+    its tone curve, and any non-neutral gain/offset/saturation.
+
+    Two things this deliberately does NOT do, both established by measurement:
+
+    * It does not apply the white-balance gains. ffmpeg's decode already comes
+      out near-neutral (B/G 0.93 on a tungsten-lit test clip, against 0.21 for
+      the sensor's raw balance), so applying them again is a *second* white
+      balance - that was pushing B/G to 1.37 and giving everything a purple cast.
+    * It does not apply a fixed gamma on top of the tone curve. The curve
+      replaces it; doing both blows the picture out.
+
+    Without a sidecar it falls back to the previous wbgain+gamma behaviour, so
+    un-backfilled clips and non-Phantom footage are unchanged.
+
+    Returns a comma-chained fragment (no pad labels) to prepend to `[0:v]`, or
+    "" when the file carries no Phantom colour information at all. The
+    operator's exposure / contrast / white-balance grade composes after this."""
+    look = look if look is not None else load_cine_look(input_path)
+    curve = _tone_curve_filter((look or {}).get("tone"))
+    if curve:
+        parts = ["format=gbrp16le", curve]
+        # Only what the camera actually set - these are all neutral on a stock
+        # setup, so they usually contribute nothing.
+        eq = []
+        gain = _as_float((look or {}).get("gain"), 1.0)
+        offset = _as_float((look or {}).get("offset"), 0.0)
+        sat = _as_float((look or {}).get("saturation"), 1.0)
+        if abs(gain - 1.0) > 1e-3:
+            eq.append(f"contrast={min(3.0, max(0.1, gain)):.4f}")
+        if abs(offset) > 1e-3:
+            eq.append(f"brightness={min(1.0, max(-1.0, offset)):.4f}")
+        if abs(sat - 1.0) > 1e-3:
+            eq.append(f"saturation={min(3.0, max(0.0, sat)):.4f}")
+        if eq:
+            parts.append("eq=" + ":".join(eq))
+        return ",".join(parts)
+
     try:
         out = subprocess.run(
             [ffprobe_bin, "-v", "error", "-select_streams", "v:0",
@@ -338,13 +412,23 @@ def build_cine_source_filter(input_path, ffprobe_bin: str, profile: str = "rec70
             input_path)
         return ""
 
+    # Legacy path: no sidecar, so we don't know the camera's curve. Kept
+    # byte-identical to the previous behaviour rather than guessing, so an
+    # un-backfilled clip renders as it always did. Run the backfill to get the
+    # camera's real colour instead.
+    logger.info("no colour sidecar for %s - using the legacy wbgain+gamma look; "
+                "run the Phantom colour backfill to pick up the camera's own curve",
+                getattr(input_path, "name", input_path))
     r_gain = min(4.0, max(0.2, r_gain))
     b_gain = min(4.0, max(0.2, b_gain))
-    tone = _CINE_PROFILES.get(str(profile or "rec709").lower())
-    if tone is None:
-        logger.warning("unknown colour profile %r - using rec709", profile)
-        tone = _CINE_PROFILES["rec709"]
     return (
         f"format=gbrp16le,colorchannelmixer=rr={r_gain:.4f}:gg=1:bb={b_gain:.4f},"
-        f"{tone}"
+        f"eq=gamma=2.2"
     )
+
+
+def _as_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default

@@ -53,6 +53,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 _CINE_SUFFIX = ".cine"
 _PART_SUFFIX = ".part"
+_LOOK_SUFFIX = ".look.json"   # must match effects.LOOK_SUFFIX
 _SAVE_TIMEOUT = 1800.0     # ceiling for one transfer; see _await_save
 # A whole idle cycle (connect + get_state + disconnect) measures well under
 # 100 ms against a VEO 4K, so the record badge's freshness is set by this sleep
@@ -556,6 +557,7 @@ class PhantomImportServer:
                     rec["bpp"] = round(size * 8 / (w * h * rec["frames"]), 2)
             except OSError:
                 pass
+            self._write_look_sidecar(final)
             rec["ok"] = True
             self._note_downloaded(partition, take_id)
             self._downloads.appendleft(rec)
@@ -734,6 +736,58 @@ class PhantomImportServer:
             save_phantom_settings(self.inbox_dir, {"partition_count": res["applied"]["partition_count"]})
         self._refresh_camera_state()
         return res
+
+    def _write_look_sidecar(self, clip: Path) -> bool:
+        """Record the camera's colour description beside the clip.
+
+        Most of it - the tone curve above all - never reaches ffprobe, so
+        without this the renderer has no way to reproduce the camera's look and
+        falls back to a flat approximation.
+        """
+        try:
+            res = self._bridge.request("read_look", {"path": str(clip)}, timeout=60)
+        except BridgeError as exc:
+            logger.warning("could not read the colour profile of %s: %s", clip.name, exc)
+            return False
+        try:
+            Path(str(clip.with_suffix("")) + _LOOK_SUFFIX).write_text(
+                json.dumps({"clip": clip.name, "look": res.get("look")}, indent=2),
+                encoding="utf-8")
+            return True
+        except OSError as exc:
+            logger.warning("could not write the colour sidecar for %s: %s", clip.name, exc)
+            return False
+
+    def backfill_looks(self, folder: Path | None = None) -> dict[str, Any]:
+        """Generate colour sidecars for clips already on disk.
+
+        Reading a look needs no camera - the SDK opens the file directly - so
+        this works while show control holds the port.
+        """
+        base = Path(folder) if folder else Path(str(self._settings.get("dest_dir", "")).strip())
+        if not base.is_dir():
+            return {"ok": False, "error": f"not a folder: {base}"}
+        started = self._bridge.running
+        if not started:
+            err = self._bridge.start()
+            if err:
+                return {"ok": False, "error": f"camera bridge: {err}"}
+        done, skipped, failed = 0, 0, 0
+        try:
+            for clip in sorted(base.rglob(f"*{_CINE_SUFFIX}")):
+                if Path(str(clip.with_suffix("")) + _LOOK_SUFFIX).exists():
+                    skipped += 1
+                    continue
+                if self._write_look_sidecar(clip):
+                    done += 1
+                else:
+                    failed += 1
+        finally:
+            if not started:
+                self._bridge.stop()
+        logger.info("Phantom colour backfill: %s written, %s already had one, %s failed",
+                    done, skipped, failed)
+        return {"ok": True, "written": done, "skipped": skipped, "failed": failed}
 
     @staticmethod
     def _sweep_stale_parts(dest: Path) -> None:

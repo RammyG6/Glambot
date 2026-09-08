@@ -214,22 +214,6 @@
             </div>
           </div>
 
-          <div class="row">
-            <div>
-              <label for="color_profile">Colour profile (raw footage)</label>
-              <select id="color_profile" name="color_profile">
-                {% for val, label in [
-                     ('rec709', 'Rec709 — display-ready (default)'),
-                     ('log1',   'Log1 — flatter, for grading'),
-                     ('log2',   'Log2 — flattest, for grading')] %}
-                  <option value="{{ val }}" {% if values.get('color_profile', 'rec709') == val %}selected{% endif %}>{{ label }}</option>
-                {% endfor %}
-              </select>
-              <p class="hint">The base look applied to raw Phantom <code>.cine</code> footage before the
-                Colour &amp; exposure grade below. These are Glambot's own curves &mdash; this camera has no
-                log mode of its own, so they don't match PCC's Log1/Log2. Other footage is unaffected.</p>
-            </div>
-          </div>
 
           <div class="row">
             <div>

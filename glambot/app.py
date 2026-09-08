@@ -28,7 +28,6 @@ from werkzeug.utils import secure_filename
 from .config import (
     AUDIO_EXTENSIONS,
     EMAIL_RE,
-    VALID_COLOR_PROFILES,
     ConfigError,
     extract_drive_folder_id,
     load_config,
@@ -795,6 +794,21 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
             return redirect(url_for("phantom_import_page"))
         server.download_now()
         flash("Download requested - it runs on the next port handoff.", "info")
+        return redirect(url_for("phantom_import_page"))
+
+    @app.post("/phantom-import/backfill-looks")
+    def phantom_import_backfill_looks():
+        """Write colour sidecars for clips already downloaded, so they render
+        with the camera's own tone curve instead of the flat fallback."""
+        server = _phantom()
+        if server is None:
+            return jsonify({"ok": False, "error": "the camera bridge isn't available"}), 503
+        result = server.backfill_looks()
+        if result.get("ok"):
+            flash(f"Colour profiles: {result['written']} written, "
+                  f"{result['skipped']} already had one, {result['failed']} failed.", "info")
+        else:
+            flash(f"Backfill failed: {result.get('error')}", "error")
         return redirect(url_for("phantom_import_page"))
 
     @app.post("/phantom-import/cancel-save")
@@ -1898,7 +1912,6 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
 
     def _do_preview(sample_path: Path, form, source_fps: float | None = None,
                     trim_start: str | None = None, trim_end: str | None = None,
-                    color_profile: str = "rec709",
                     ) -> tuple[str | None, float | None, str | None]:
         from .processor import (_resolve_ffmpeg, _probe_duration, _effective_duration,
                                 _FFPROBE)
@@ -1930,8 +1943,7 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         cine_fix = ""
         if sample_path.suffix.lower() == ".cine":
             # Same base look as the real render, or the preview misrepresents it.
-            cine_fix = build_cine_source_filter(
-                sample_path, _FFPROBE, form.get("color_profile") or color_profile)
+            cine_fix = build_cine_source_filter(sample_path, _FFPROBE)
 
         grade = Grade(**advanced["grade"]) if advanced["grade"] else None
         ramp = None
@@ -2008,18 +2020,15 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         else:
             return jsonify({"ok": False, "error": "Sample clip not found."}), 400
         from .processor import _effective_source_fps
-        profile = "rec709"
         try:
             _cfg = load_config(project_dir)
             trim = _cfg.trim_for(target)
             src_fps = _effective_source_fps(sample_path, _cfg.source_fps)
-            profile = _cfg.color_profile
         except ConfigError:
             trim, src_fps = None, _effective_source_fps(sample_path, None)
         name, duration, err = _do_preview(
             sample_path, request.form, source_fps=src_fps,
-            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None),
-            color_profile=profile)
+            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None))
         if err:
             return jsonify({"ok": False, "error": err}), 400
         return jsonify({"ok": True, "url": url_for("serve_preview", project=project, name=name),
@@ -2040,8 +2049,7 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         src_fps = _effective_source_fps(sample_path, config.source_fps)
         name, duration, err = _do_preview(
             sample_path, request.form, source_fps=src_fps,
-            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None),
-            color_profile=config.color_profile)
+            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None))
         if err:
             return jsonify({"ok": False, "error": err}), 400
         return jsonify({"ok": True, "url": url_for("serve_preview", project=job.project, name=name),
@@ -2592,7 +2600,6 @@ def _project_values_for_edit(data: dict, project_name: str) -> dict:
     else:
         values["mode"] = "standard"
     values["full_automation"] = bool(data.get("auto_deliver"))
-    values["color_profile"] = data.get("color_profile", "rec709")
     values["download_pin"] = data.get("download_pin") or ""
     values["email_subject"] = data.get("email_subject") or ""
     values["email_body"] = data.get("email_body") or ""
@@ -3114,9 +3121,6 @@ def _parse_project_form(req):
         mode = "standard"
     lan_delivery = mode == "lan"
     offline_mode = mode == "offline"
-    color_profile = (form.get("color_profile") or "rec709").strip().lower()
-    if color_profile not in VALID_COLOR_PROFILES:
-        return None, "Invalid colour profile."
     # The guest download PIN is optional for the Wi-Fi / offline modes: blank
     # means guests download with no PIN prompt. Only the format is enforced.
     download_pin = form.get("download_pin", "").strip() or None
@@ -3220,7 +3224,6 @@ def _parse_project_form(req):
         "lan_delivery": lan_delivery,
         "offline_mode": offline_mode,
         "download_pin": download_pin,
-        "color_profile": color_profile,
         "soundtrack_volume_db": soundtrack_volume_db if soundtrack_volume_db is not None else 0.0,
         "original_volume_db": original_volume_db if original_volume_db is not None else 0.0,
         "soundtrack_trim": {

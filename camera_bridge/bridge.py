@@ -46,6 +46,7 @@ import ctypes
 import json
 import os
 import queue
+import struct
 import sys
 import threading
 import time
@@ -94,6 +95,22 @@ GCI_LOGMODE = 246
 GS_SUPPORTS_LOG_MODE = 9005   # camera-side read-only capability (PhCon.cs)
 LIVE_CINE = -1
 
+# The rest of the camera's colour description. ffprobe exposes almost none of
+# this - its `gamma` tag is the deprecated int32 Gamma (Phint.h:374), not
+# fGamma - so the renderer has to be told, which is what `read_look` is for.
+GCI_BRIGHT = 202        # fOffset      neutral 0.0
+GCI_CONTRAST = 203      # fGain        neutral 1.0
+GCI_GAMMA = 204         # fGamma       neutral 1.0
+GCI_SATURATION = 205    # fSaturation  neutral 1.0
+GCI_FLARE = 225
+GCI_TONE = 227          # TONEDESC struct - the tone curve, i.e. the LUT
+GCI_ENABLEMATRICES = 228
+GCI_USERMATRIX = 229    # CMDESC struct
+GCI_CALIBMATRIX = 231   # CMDESC struct - the factory colour correction
+GCI_SUPPORTSTOE = 243
+GCI_TOE = 244           # fToe         neutral 1.0
+GCI_REALBPP = 4
+
 COLOR_PROFILES = {"Rec709": 0, "Log1": 1, "Log2": 2}
 _PROFILE_BY_VALUE = {v: k for k, v in COLOR_PROFILES.items()}
 
@@ -122,6 +139,13 @@ def _phfile() -> Any:
         lib.PhSetUseCase.restype = ctypes.c_int
         lib.PhGetUseCase.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
         lib.PhGetUseCase.restype = ctypes.c_int
+        # Struct-valued cine info (tone curve, colour matrices). pyphantom's
+        # generic get_selector_* can only return scalars and hands back the
+        # struct's first field, so these have to go through the C API.
+        lib.PhGetCineInfo.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p]
+        lib.PhGetCineInfo.restype = ctypes.c_int
+        lib.PhSetCineInfo.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p]
+        lib.PhSetCineInfo.restype = ctypes.c_int
         # NB: PhFile.Dll also exports PhStopWriteCineFileAsync, which looks like
         # the obvious way to cancel a transfer. It is deliberately NOT used:
         # there is no Phantom header in this repo to check its signature
@@ -155,6 +179,74 @@ def _set_save_use_case(cine_handle: Any) -> bool:
     except Exception as exc:  # noqa: BLE001
         _log(f"PhSetUseCase failed: {exc}", "warning")
         return False
+
+
+def _cine_struct(cine_handle: Any, selector: int, floats: int) -> list[float] | None:
+    """Read a struct-valued cine selector as its leading floats.
+
+    Deliberately oversized buffer: sizing it to the struct we expect crashed
+    the process outright on GCI_CALIBMATRIX, and a hard crash here would take
+    a download with it.
+    """
+    lib = _phfile()
+    if lib is None:
+        return None
+    try:
+        buf = ctypes.create_string_buffer(8192)
+        if lib.PhGetCineInfo(ctypes.c_void_p(int(cine_handle)), selector, buf) != 0:
+            return None
+        return list(struct.unpack_from(f"<{floats}f", buf.raw, 0))
+    except Exception as exc:  # noqa: BLE001
+        _log(f"PhGetCineInfo({selector}) failed: {exc}", "warning")
+        return None
+
+
+def _read_tone(cine_handle: Any) -> dict[str, Any] | None:
+    """TONEDESC (PhFile.h:106-112): int count, float[64] points, char[256] label."""
+    lib = _phfile()
+    if lib is None:
+        return None
+    try:
+        buf = ctypes.create_string_buffer(8192)
+        if lib.PhGetCineInfo(ctypes.c_void_p(int(cine_handle)), GCI_TONE, buf) != 0:
+            return None
+        raw = buf.raw
+        count = struct.unpack_from("<i", raw, 0)[0]
+        if not 0 < count <= 32:
+            return None
+        pts = struct.unpack_from(f"<{count * 2}f", raw, 4)
+        label = raw[4 + 64 * 4: 4 + 64 * 4 + 256].split(b"\x00")[0].decode(errors="replace")
+        return {"label": label,
+                "points": [[round(pts[2 * i], 6), round(pts[2 * i + 1], 6)]
+                           for i in range(count)]}
+    except Exception as exc:  # noqa: BLE001
+        _log(f"tone curve read failed: {exc}", "warning")
+        return None
+
+
+def _read_look(cine: Any) -> dict[str, Any]:
+    """Everything the renderer needs to reproduce the camera's colour."""
+    h = cine._cine_handle
+    wb = _safe(lambda: cine.white_balance)
+    levels = _safe(lambda: cine.black_white_levels)
+    out: dict[str, Any] = {
+        "wb_red": _safe(lambda: float(wb.red_gain)) if wb else None,
+        "wb_blue": _safe(lambda: float(wb.blue_gain)) if wb else None,
+        "black_level": _safe(lambda: int(levels.black_level)) if levels else None,
+        "white_level": _safe(lambda: int(levels.white_level)) if levels else None,
+        "tone": _read_tone(h),
+        "calib_matrix": _cine_struct(h, GCI_CALIBMATRIX, 9),
+        "user_matrix": _cine_struct(h, GCI_USERMATRIX, 9),
+    }
+    for name, sel in (("gamma", GCI_GAMMA), ("gain", GCI_CONTRAST), ("offset", GCI_BRIGHT),
+                      ("saturation", GCI_SATURATION), ("toe", GCI_TOE), ("flare", GCI_FLARE)):
+        val = _safe(lambda s=sel: cine.get_selector_float(s))
+        out[name] = round(float(val), 6) if val is not None else None
+    for name, sel in (("log_mode", GCI_LOGMODE), ("real_bpp", GCI_REALBPP),
+                      ("enable_matrices", GCI_ENABLEMATRICES)):
+        val = _safe(lambda s=sel: cine.get_selector_int(s))
+        out[name] = int(val) if val is not None else None
+    return out
 
 
 def _with_live_cine(cam: Any, fn: Any) -> Any:
@@ -658,6 +750,23 @@ class Bridge:
         if rec is None:
             raise RuntimeError("unknown job_id")
         return {"pct": rec["pct"], "done": rec["done"], "error": rec["error"]}
+
+    def read_look(self, args: dict) -> dict:
+        """Read a .cine file's colour description. No camera needed -
+        Cine.from_filepath opens the file directly - so this also works for
+        clips already on disk and while show control holds the port."""
+        self._require_pyphantom()
+        path = str(args["path"])
+        self._phantom()          # ensure the key table is generated
+        cine = Cine.from_filepath(path)
+        try:
+            look = _read_look(cine)
+        finally:
+            try:
+                cine.close()
+            except Exception:
+                pass
+        return {"path": path, "look": look}
 
     def save_nvm(self, args: dict) -> dict:
         cam = self._require_cam()

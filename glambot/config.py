@@ -54,11 +54,6 @@ VALID_OVERLAY_POSITIONS = {
 }
 
 VALID_DELIVERY_MODES = {"email", "qr_only"}
-
-# Base look applied to raw Phantom footage before the operator's grade.
-# These are Glambot's own curves, not Vision Research's - this camera reports no
-# log mode (gsSupportsLogMode = 0), so the profile cannot come from the file.
-VALID_COLOR_PROFILES = ("rec709", "log1", "log2")
 VALID_ROTATIONS = {0, 90, -90, 180}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 MIN_DB, MAX_DB = -60.0, 12.0
@@ -160,8 +155,6 @@ class ProjectConfig:
     offline_mode: bool = False
     grade: Grade | None = None
     speed_ramp: SpeedRamp | None = None
-    # Base look for raw .cine footage; the operator's `grade` layers on top.
-    color_profile: str = "rec709"
     email_subject: str | None = None
     email_body: str | None = None
     # Referenced asset files that were missing on disk (see load_config). Each
@@ -649,13 +642,6 @@ def load_config(project_dir: Path) -> ProjectConfig:
     # (see glambot/guest.py).
 
     # --- Advanced editing: colour grade + speed ramp ------------------
-    # An unknown profile falls back rather than refusing to load the project -
-    # a look preference is never worth blocking a shoot over.
-    color_profile = str(data.get("color_profile", "rec709") or "rec709").lower()
-    if color_profile not in VALID_COLOR_PROFILES:
-        logger.warning("%s/config.json: unknown color_profile %r - using rec709",
-                       project_dir.name, color_profile)
-        color_profile = "rec709"
     grade = _parse_grade(data.get("grade"), "grade", project_dir)
     speed_ramp = _parse_speed_ramp(data.get("speed_ramp"), "speed_ramp", project_dir)
 
@@ -719,7 +705,6 @@ def load_config(project_dir: Path) -> ProjectConfig:
         offline_mode=offline_mode,
         grade=grade,
         speed_ramp=speed_ramp,
-        color_profile=color_profile,
         email_subject=email_subject,
         email_body=email_body,
         missing_assets=missing_assets,
