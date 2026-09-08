@@ -74,11 +74,28 @@ except Exception as exc:  # pragma: no cover - depends on runtime packaging
 # the large win it was once assumed to be - see camera_bridge/README.md.
 UC_SAVE = 2
 
-# Cine info selectors (GCI_* in PhCon.h, mirrored in pyphantom.utils).
+# Cine info selectors (GCI_* in PhFile.h, mirrored in pyphantom.utils).
 GCI_TRIGTIMESEC = 10        # trigger time, whole seconds
 GCI_TRIGTIMEFR = 11         # trigger time, fractions
 GCI_TOTALIMAGECOUNT = 30    # frames actually recorded
 GCI_WRITEERR = 109          # last error from a save on this cine
+
+# Colour profile ("log mode"). pyphantom ports neither the selectors nor an
+# enum for these, so they come straight from the SDK headers:
+#   PhFile.h:404-405  GCI_SUPPORTSLOGMODE / GCI_LOGMODE
+#   Phint.h:640-644   "0 - log mode disabled. 1, 2, etc - log mode enabled.
+#                      If log mode enabled, gain, gamma, the pedestals,
+#                      r/g/b gains, offset and flare are inactive."
+# It is a *cine* parameter - there is no camera-side setter - so the live value
+# lives on the live cine handle, which pyphantom addresses as cine number -1
+# (see pyphantom/camera.py: `self._live_cine = Cine.from_camera(self, -1)`).
+GCI_SUPPORTSLOGMODE = 245
+GCI_LOGMODE = 246
+GS_SUPPORTS_LOG_MODE = 9005   # camera-side read-only capability (PhCon.cs)
+LIVE_CINE = -1
+
+COLOR_PROFILES = {"Rec709": 0, "Log1": 1, "Log2": 2}
+_PROFILE_BY_VALUE = {v: k for k, v in COLOR_PROFILES.items()}
 
 _PHFILE: Any = None
 _PHFILE_TRIED = False
@@ -138,6 +155,54 @@ def _set_save_use_case(cine_handle: Any) -> bool:
     except Exception as exc:  # noqa: BLE001
         _log(f"PhSetUseCase failed: {exc}", "warning")
         return False
+
+
+def _with_live_cine(cam: Any, fn: Any) -> Any:
+    """Run ``fn(cine)`` against the camera's live cine, always closing it.
+
+    Same open/close discipline as ``Bridge._take_id``. Deliberately not
+    ``cam._live_cine``: that handle is private to the pyphantom wrapper and
+    closed in its own teardown.
+    """
+    cine = None
+    try:
+        cine = Cine.from_camera(cam, LIVE_CINE)
+        return fn(cine)
+    finally:
+        if cine is not None:
+            try:
+                cine.close()
+            except Exception:
+                pass
+
+
+def _supports_color_profile(cam: Any) -> bool:
+    """Whether this body has log mode at all. Asked before the field is offered,
+    so an unsupported camera never shows a control that would quietly do
+    nothing."""
+    val = _safe(lambda: cam.get_selector_int(GS_SUPPORTS_LOG_MODE))
+    if val is None:
+        val = _safe(lambda: _with_live_cine(
+            cam, lambda c: c.get_selector_uint(GCI_SUPPORTSLOGMODE)))
+    return bool(val)
+
+
+def _get_color_profile(cam: Any) -> str | None:
+    raw = _with_live_cine(cam, lambda c: c.get_selector_uint(GCI_LOGMODE))
+    if raw is None:
+        return None
+    n = int(raw)
+    # Header says "1, 2, etc", so don't assume 2 is the ceiling - name the ones
+    # we know and pass anything else through rather than mislabelling it.
+    return _PROFILE_BY_VALUE.get(n, f"Log{n}")
+
+
+def _set_color_profile(cam: Any, value: Any) -> None:
+    # set_selector_* takes a single SetSelector(selector, value) namedtuple -
+    # the one-arg signature in pyphantom/camera.py wins over the two-arg form in
+    # its README. Same shape as the FrameRange already used in save_cine.
+    _with_live_cine(cam, lambda c: c.set_selector_uint(
+        utils.SetSelector(GCI_LOGMODE, int(value))))
 
 
 _out_lock = threading.Lock()
@@ -333,6 +398,10 @@ class Bridge:
 
     _LIVE_FIELDS = {
         # name: (getter, setter or None, kind)
+        # getter/setter are attribute names on the pyphantom Camera, or
+        # callables taking (cam) / (cam, value) for anything the wrapper has no
+        # property for - the colour profile is a cine selector, not a camera one.
+        "color_profile": (_get_color_profile, _set_color_profile, "profile"),
         "partition_count": ("partition_count", "partition_count", "int"),
         "exp_index": ("exp_index", "exp_index", "int"),
         "frame_rate": ("frame_rate", "frame_rate", "int"),
@@ -348,17 +417,34 @@ class Bridge:
         "nvm_auto_save": ("nvm_auto_save", "nvm_auto_save", "bool"),
     }
 
+    @staticmethod
+    def _read_field(cam: Any, getter: Any) -> Any:
+        val = getter(cam) if callable(getter) else getattr(cam, getter)
+        # The page preselects a dropdown with String(choice) === String(value),
+        # so an enum must come back as its bare name: a SyncModeEnum serialises
+        # as "SyncModeEnum.INTERNAL" and would never match the "INTERNAL"
+        # option, leaving the control looking blank/wrong.
+        return getattr(val, "name", val)
+
     def get_settings(self, _args: dict) -> dict:
         cam = self._require_cam()
+        choices_for = {
+            "sync": [m.name for m in utils.SyncModeEnum],
+            "profile": list(COLOR_PROFILES),
+        }
         fields: dict[str, Any] = {}
         for name, (getter, setter, kind) in self._LIVE_FIELDS.items():
-            val = _safe(lambda g=getter: getattr(cam, g))
+            # Don't offer a control the body can't honour - it would appear to
+            # work and quietly do nothing.
+            if kind == "profile" and not _supports_color_profile(cam):
+                continue
+            val = _safe(lambda g=getter: self._read_field(cam, g))
             entry: dict[str, Any] = {"value": val, "writable": setter is not None, "kind": kind}
             # gsExpIndexPresets (1091) returns a typed ISO table the generic
             # pyphantom accessors can't unpack (comes back as a bare int), so
             # exp_index stays a plain number field.
-            if kind == "sync":
-                entry["choices"] = [m.name for m in utils.SyncModeEnum]
+            if kind in choices_for:
+                entry["choices"] = choices_for[kind]
             fields[name] = entry
         return {"fields": fields}
 
@@ -371,10 +457,14 @@ class Bridge:
             if spec is None or spec[1] is None:
                 errors[name] = "not a writable field"
                 continue
-            _getter, setter, kind = spec
+            getter, setter, kind = spec
             try:
-                setattr(cam, setter, _coerce(value, kind))
-                applied[name] = _safe(lambda g=spec[0]: getattr(cam, g))
+                coerced = _coerce(value, kind)
+                if callable(setter):
+                    setter(cam, coerced)
+                else:
+                    setattr(cam, setter, coerced)
+                applied[name] = _safe(lambda g=getter: self._read_field(cam, g))
             except Exception as exc:
                 errors[name] = str(exc)
         return {"applied": applied, "errors": errors}
@@ -613,6 +703,18 @@ def _coerce(value: Any, kind: str) -> Any:
         return bool(value) if not isinstance(value, str) else value.lower() in {"1", "true", "on", "yes"}
     if kind == "sync":
         return utils.SyncModeEnum[value] if isinstance(value, str) else utils.SyncModeEnum(int(value))
+    if kind == "profile":
+        if isinstance(value, str):
+            name = value.strip()
+            if name in COLOR_PROFILES:
+                return COLOR_PROFILES[name]
+            # _get_color_profile labels an unnamed mode "LogN"; accept it back.
+            if name.lower().startswith("log") and name[3:].isdigit():
+                return int(name[3:])
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise RuntimeError(f"unknown colour profile {value!r}")
     return value
 
 
