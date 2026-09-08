@@ -133,12 +133,21 @@ soundtracks/
   `.env`. Accepts either the bare folder ID or its full share URL.
 - overlay paths are relative to the repo root (e.g. put shared graphics in
   `overlays/`).
-- `auto_deliver` / `lan_delivery` / `offline_mode` (all optional booleans, at
-  most one true): the project's **Mode**. The New Project form presents these
-  as one exclusive radio — Standard / Fully automatic / Local Wi-Fi link /
-  Fully offline. `download_pin` (4–8 digits) is optional for the Wi-Fi and
-  offline modes — leave it blank for no-password guest downloads. See
-  "Offline LAN delivery" below.
+- `lan_delivery` / `offline_mode` (optional booleans, at most one true): where
+  clips go. The New Project form presents these as one exclusive **Mode** radio
+  — Standard / Local Wi-Fi link / Fully offline. `download_pin` (4–8 digits) is
+  optional for the Wi-Fi and offline modes — leave it blank for no-password
+  guest downloads. See "Offline LAN delivery" below.
+- `auto_deliver` (optional boolean): whether a human approves. Independent of
+  the mode above, so it combines with any of them — the form shows it as the
+  **"Full automation — deliver without approval"** checkbox. See "Full
+  automation" below.
+- `color_profile` (optional, one of `rec709` / `log1` / `log2`, default
+  `rec709`): the base look applied to raw Phantom `.cine` footage before
+  `grade`. `log1`/`log2` are progressively flatter for grading downstream.
+  These are Glambot's own curves, not Vision Research's — this camera reports
+  no log mode, so nothing in the file describes what Phantom's would be. Other
+  footage is unaffected.
 - `grade` (optional, `{ "exposure": 0.0, "contrast": 1.0, "white_balance": 0 }`):
   exposure in stops (-2..2), contrast (0.5..2), white balance (-100 warm ..
   100 cool). Applied to every clip. See "Advanced editing".
@@ -174,12 +183,17 @@ the review screen before approving:
 
 ### Full automation
 
-Pick **"Fully automatic delivery"** in the New Project form's **Mode** section
-(or set `"auto_deliver": true` in `config.json`) to skip the manual Approve step
-entirely — as soon as a clip finishes processing, it uploads and delivers
-itself automatically, using the project's default recipient/email template
-(for `email` mode) or generating the kiosk QR photo straight away (for
-`qr_only` mode). Works with either delivery method.
+Tick **"Full automation — deliver without approval"** in the New Project form's
+**Mode** section (or set `"auto_deliver": true` in `config.json`) to skip the
+manual Approve step entirely — as soon as a clip finishes processing, it
+delivers itself, using the project's default recipient/email template (for
+`email` mode) or generating the kiosk QR photo straight away (for `qr_only`).
+
+It is independent of the delivery mode, so it combines with **any** of them,
+including Fully offline: a clip goes from the inbox to the guest's download
+page with no operator action at all. Nobody sees a clip before the guest does,
+so a failed or ugly render goes out unnoticed — the only remaining check is the
+`verify_output` sanity test that refuses to deliver a corrupt file.
 
 Since there's no Approve click for `qr_only` + full automation, open
 **`http://127.0.0.1:5000/projects/<project name>/kiosk`** on the venue

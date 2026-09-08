@@ -28,6 +28,7 @@ from werkzeug.utils import secure_filename
 from .config import (
     AUDIO_EXTENSIONS,
     EMAIL_RE,
+    VALID_COLOR_PROFILES,
     ConfigError,
     extract_drive_folder_id,
     load_config,
@@ -199,20 +200,19 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
             })
         processing_jobs = store.list_jobs(status="processing")
 
-        # Full-automation kiosk clips (qr_only + auto_deliver) don't get an
-        # approve/reject card — they deliver themselves. The only reason one
-        # would be sitting in "ready" is that its automatic delivery failed;
-        # surface those in a compact read-only "needs attention" list with a
-        # Retry button instead of a full review card.
+        # Full-automation clips don't get an approve/reject card — they deliver
+        # themselves, so offering an Approve button for one is a contradiction.
+        # The only reason one would be sitting in "ready" is that its automatic
+        # delivery failed; surface those in a compact read-only "needs
+        # attention" list with a Retry button instead of a full review card.
         cards = []
         auto_failed = []
         for job in store.list_jobs(status="ready"):
             try:
-                config = load_config(inbox_dir / job.project)
-                is_auto_kiosk = config.delivery_mode == "qr_only" and config.auto_deliver
+                is_auto = load_config(inbox_dir / job.project).auto_deliver
             except ConfigError:
-                is_auto_kiosk = False
-            if is_auto_kiosk:
+                is_auto = False
+            if is_auto:
                 if job.error:
                     auto_failed.append(job)
                 # else: momentarily ready, about to auto-deliver — skip silently
@@ -1127,7 +1127,7 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
                 config = load_config(inbox_dir / job.project)
             except ConfigError:
                 continue
-            if config.delivery_mode == "qr_only" and config.auto_deliver:
+            if config.auto_deliver:
                 targets.append((job, config))
         if not targets:
             flash("No failed deliveries to retry.", "info")
@@ -1367,24 +1367,16 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
 
     @app.post("/projects/<project>/toggle-delivery-mode")
     def toggle_delivery_mode(project):
-        """Flip a project between manual approval and full-auto delivery -
-        the quick review-page equivalent of the Mode radio's
-        standard<->auto choice. Only valid for projects not in LAN / Offline
-        mode (auto_deliver is one of four exclusive modes; see the Mode
-        fieldset in project_form.html). Newly-processed clips follow the new
+        """Flip a project between manual approval and full-auto delivery - the
+        quick review-page equivalent of the "Full automation" checkbox in the
+        project's Mode fieldset. Valid in every delivery mode: approval is now
+        independent of where clips go. Newly-processed clips follow the new
         setting; anything already rendered / delivered is untouched."""
         project_dir = _resolve_project(project)
         try:
             config = load_config(project_dir)
         except ConfigError as exc:
             flash(f"Config problem: {exc}", "error")
-            return redirect(url_for("index") + "#clips")
-        if config.lan_delivery or config.offline_mode:
-            flash(
-                f"“{project}” uses a Wi-Fi / offline delivery mode — change it "
-                "from the project's settings instead.",
-                "error",
-            )
             return redirect(url_for("index") + "#clips")
         new_value = not config.auto_deliver
         save_config(project_dir, {"auto_deliver": new_value}, merge=True)
@@ -1906,6 +1898,7 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
 
     def _do_preview(sample_path: Path, form, source_fps: float | None = None,
                     trim_start: str | None = None, trim_end: str | None = None,
+                    color_profile: str = "rec709",
                     ) -> tuple[str | None, float | None, str | None]:
         from .processor import (_resolve_ffmpeg, _probe_duration, _effective_duration,
                                 _FFPROBE)
@@ -1936,7 +1929,9 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         # ramp/grade chain, exactly as build_ffmpeg_cmd() does for the real render.
         cine_fix = ""
         if sample_path.suffix.lower() == ".cine":
-            cine_fix = build_cine_source_filter(sample_path, _FFPROBE)
+            # Same base look as the real render, or the preview misrepresents it.
+            cine_fix = build_cine_source_filter(
+                sample_path, _FFPROBE, form.get("color_profile") or color_profile)
 
         grade = Grade(**advanced["grade"]) if advanced["grade"] else None
         ramp = None
@@ -2013,15 +2008,18 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         else:
             return jsonify({"ok": False, "error": "Sample clip not found."}), 400
         from .processor import _effective_source_fps
+        profile = "rec709"
         try:
             _cfg = load_config(project_dir)
             trim = _cfg.trim_for(target)
             src_fps = _effective_source_fps(sample_path, _cfg.source_fps)
+            profile = _cfg.color_profile
         except ConfigError:
             trim, src_fps = None, _effective_source_fps(sample_path, None)
         name, duration, err = _do_preview(
             sample_path, request.form, source_fps=src_fps,
-            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None))
+            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None),
+            color_profile=profile)
         if err:
             return jsonify({"ok": False, "error": err}), 400
         return jsonify({"ok": True, "url": url_for("serve_preview", project=project, name=name),
@@ -2042,7 +2040,8 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         src_fps = _effective_source_fps(sample_path, config.source_fps)
         name, duration, err = _do_preview(
             sample_path, request.form, source_fps=src_fps,
-            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None))
+            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None),
+            color_profile=config.color_profile)
         if err:
             return jsonify({"ok": False, "error": err}), 400
         return jsonify({"ok": True, "url": url_for("serve_preview", project=job.project, name=name),
@@ -2453,9 +2452,10 @@ def _project_quick_toggles(inbox_dir: Path) -> list[dict]:
     Clips tab's quick switch bar - alphabetical, skips a project with a
     broken config.json (already surfaced via its Projects-tab Edit link).
 
-    `mode_togglable` is False for LAN / Offline projects: `auto_deliver` is
-    one of four mutually-exclusive modes, so a bare standard<->auto flip
-    would be ambiguous for those - they keep using the full settings form."""
+    `mode_togglable` is now always True: approval is independent of the
+    delivery channel, so flipping it is unambiguous in every mode. It used to
+    be False for LAN / Offline because auto_deliver was one of four
+    mutually-exclusive modes."""
     items = []
     for project_dir in all_project_dirs(inbox_dir):
         try:
@@ -2466,7 +2466,7 @@ def _project_quick_toggles(inbox_dir: Path) -> list[dict]:
             "name": project_dir.name,
             "is_vertical": cfg.height > cfg.width,
             "is_auto": cfg.auto_deliver,
-            "mode_togglable": not (cfg.lan_delivery or cfg.offline_mode),
+            "mode_togglable": True,
         })
     return sorted(items, key=lambda x: x["name"])
 
@@ -2582,15 +2582,17 @@ def _project_values_for_edit(data: dict, project_name: str) -> dict:
     values["position_x"] = str(data.get("position_x", 0))
     values["position_y"] = str(data.get("position_y", 0))
 
-    # Collapse the three delivery booleans into the exclusive Mode radio.
+    # The delivery channel and the approval step are independent. Deriving the
+    # radio from auto_deliver (as this used to) meant an offline+auto project
+    # rendered as plain "offline" and lost auto_deliver on the next save.
     if data.get("offline_mode"):
         values["mode"] = "offline"
     elif data.get("lan_delivery"):
         values["mode"] = "lan"
-    elif data.get("auto_deliver"):
-        values["mode"] = "auto"
     else:
         values["mode"] = "standard"
+    values["full_automation"] = bool(data.get("auto_deliver"))
+    values["color_profile"] = data.get("color_profile", "rec709")
     values["download_pin"] = data.get("download_pin") or ""
     values["email_subject"] = data.get("email_subject") or ""
     values["email_body"] = data.get("email_body") or ""
@@ -3098,14 +3100,23 @@ def _parse_project_form(req):
         except ValueError:
             return None, "Position Y must be a whole number of pixels."
 
-    # --- Mode (one exclusive choice) ------------------------------------
-    # standard | auto | lan | offline -> the three booleans stored in config.json.
+    # --- Delivery channel, and separately whether a human approves --------
+    # The radio picks WHERE clips go; the checkbox picks WHETHER anyone has to
+    # approve them. These used to be one four-way exclusive choice, which made
+    # "offline AND fully automatic" impossible to express - and silently reset
+    # auto_deliver to False every time an offline project was saved.
     mode = form.get("mode", "standard")
     if mode not in {"standard", "auto", "lan", "offline"}:
         return None, "Invalid mode selection."
-    auto_deliver = mode == "auto"
+    # Legacy: "auto" was standard delivery with no approval step.
+    auto_deliver = bool(form.get("full_automation")) or mode == "auto"
+    if mode == "auto":
+        mode = "standard"
     lan_delivery = mode == "lan"
     offline_mode = mode == "offline"
+    color_profile = (form.get("color_profile") or "rec709").strip().lower()
+    if color_profile not in VALID_COLOR_PROFILES:
+        return None, "Invalid colour profile."
     # The guest download PIN is optional for the Wi-Fi / offline modes: blank
     # means guests download with no PIN prompt. Only the format is enforced.
     download_pin = form.get("download_pin", "").strip() or None
@@ -3209,6 +3220,7 @@ def _parse_project_form(req):
         "lan_delivery": lan_delivery,
         "offline_mode": offline_mode,
         "download_pin": download_pin,
+        "color_profile": color_profile,
         "soundtrack_volume_db": soundtrack_volume_db if soundtrack_volume_db is not None else 0.0,
         "original_volume_db": original_volume_db if original_volume_db is not None else 0.0,
         "soundtrack_trim": {

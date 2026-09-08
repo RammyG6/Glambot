@@ -350,7 +350,7 @@ def build_ffmpeg_cmd(input_path: Path, output_path: Path, config: ProjectConfig,
     # else touches the picture (so the speed ramp + grade see real colour).
     cine_fix = ""
     if input_path.suffix.lower() == ".cine":
-        cine_fix = build_cine_source_filter(input_path, _FFPROBE)
+        cine_fix = build_cine_source_filter(input_path, _FFPROBE, config.color_profile)
 
     # Input indices are assigned dynamically: [0]=video always; the overlay
     # (if any) is [1]; the soundtrack (if any) is whatever comes next.

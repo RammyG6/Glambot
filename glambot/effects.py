@@ -286,15 +286,34 @@ def build_grade_filter(grade: Grade | None, ffmpeg_bin: str) -> str:
     return ",".join(parts)
 
 
-def build_cine_source_filter(input_path, ffprobe_bin: str) -> str:
+# Base looks for raw Phantom footage, applied after the camera's white-balance
+# gains. `rec709` is the original fixed behaviour and must stay byte-identical.
+# The log variants are progressively flatter for grading downstream.
+#
+# These are Glambot's own curves, tuned by eye - NOT Vision Research's Log1/Log2.
+# This camera reports no log mode (gsSupportsLogMode = 0), so nothing in the
+# .cine tells us what Phantom's curves would look like; don't present these as
+# matching PCC.
+# NB on direction: ffmpeg's `eq` applies output = input^(1/gamma), so a *higher*
+# gamma lifts shadows. A flat/log look wants lifted blacks and reduced contrast,
+# hence gamma above 2.2 on the log variants, not below - the reverse crushes the
+# shadows it is supposed to protect.
+_CINE_PROFILES = {
+    "rec709": "eq=gamma=2.2",
+    "log1": "eq=gamma=2.6:contrast=0.85:brightness=0.03",
+    "log2": "eq=gamma=3.0:contrast=0.70:brightness=0.06",
+}
+
+
+def build_cine_source_filter(input_path, ffprobe_bin: str, profile: str = "rec709") -> str:
     """Neutralise raw Phantom `.cine` colour: ffmpeg debayers the Bayer sensor
     data but ignores the camera's embedded white-balance gains and gamma, so
     the frame comes out green and flat. Read those tags and apply them.
 
     Returns a comma-chained fragment (no pad labels) to prepend to `[0:v]`,
     or "" if the file has no `wbgain` tags (i.e. it isn't raw Phantom footage).
-    The 2.2 gamma is a sensible fixed default for near-linear raw; the operator
-    fine-tunes on top with the exposure / contrast / white-balance grade."""
+    `profile` picks the base tone curve; the operator fine-tunes on top with the
+    exposure / contrast / white-balance grade, which composes after this."""
     try:
         out = subprocess.run(
             [ffprobe_bin, "-v", "error", "-select_streams", "v:0",
@@ -321,7 +340,11 @@ def build_cine_source_filter(input_path, ffprobe_bin: str) -> str:
 
     r_gain = min(4.0, max(0.2, r_gain))
     b_gain = min(4.0, max(0.2, b_gain))
+    tone = _CINE_PROFILES.get(str(profile or "rec709").lower())
+    if tone is None:
+        logger.warning("unknown colour profile %r - using rec709", profile)
+        tone = _CINE_PROFILES["rec709"]
     return (
         f"format=gbrp16le,colorchannelmixer=rr={r_gain:.4f}:gg=1:bb={b_gain:.4f},"
-        f"eq=gamma=2.2"
+        f"{tone}"
     )

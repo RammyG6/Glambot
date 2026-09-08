@@ -125,10 +125,6 @@
             Standard &mdash; manual approve
           </label>
           <label class="radio-label">
-            <input type="radio" name="mode" value="auto" {% if delivery_flow == 'auto' %}checked{% endif %}>
-            Fully automatic delivery
-          </label>
-          <label class="radio-label">
             <input type="radio" name="mode" value="lan" {% if delivery_flow == 'lan' %}checked{% endif %}>
             Local Wi-Fi download link
           </label>
@@ -137,6 +133,15 @@
             Fully offline &mdash; no internet
           </label>
           <p class="hint" id="modeHint"></p>
+
+          <label class="check-label">
+            <input type="checkbox" id="full_automation" name="full_automation"
+                   {% if values.get('full_automation') %}checked{% endif %}>
+            Full automation &mdash; deliver without approval
+          </label>
+          <p class="hint">Clips go straight to the guest as soon as they finish rendering, with no
+            Approve step. Works with any of the modes above. Nobody sees a clip before the guest does,
+            so a bad render goes out unnoticed.</p>
 
           <label for="delivery_mode">Delivery method</label>
           <select id="delivery_mode" name="delivery_mode">
@@ -206,6 +211,23 @@
               <input type="number" id="source_fps" name="source_fps" min="1" max="1000" step="0.001"
                      placeholder="e.g. 25" value="{{ values.get('source_fps', '') }}">
               <p class="hint">Leave blank: footage that reports a high capture rate (e.g. a Phantom <code>.cine</code> at 200&nbsp;fps) is played back at 25&nbsp;fps automatically; normal video is unchanged. Enter a number to force a specific playback rate for this project.</p>
+            </div>
+          </div>
+
+          <div class="row">
+            <div>
+              <label for="color_profile">Colour profile (raw footage)</label>
+              <select id="color_profile" name="color_profile">
+                {% for val, label in [
+                     ('rec709', 'Rec709 — display-ready (default)'),
+                     ('log1',   'Log1 — flatter, for grading'),
+                     ('log2',   'Log2 — flattest, for grading')] %}
+                  <option value="{{ val }}" {% if values.get('color_profile', 'rec709') == val %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+              <p class="hint">The base look applied to raw Phantom <code>.cine</code> footage before the
+                Colour &amp; exposure grade below. These are Glambot's own curves &mdash; this camera has no
+                log mode of its own, so they don't match PCC's Log1/Log2. Other footage is unaffected.</p>
             </div>
           </div>
 
@@ -453,8 +475,7 @@
   const downloadPin = document.getElementById('download_pin');
 
   const MODE_HINTS = {
-    standard: 'Clips wait for a per-clip Approve click.',
-    auto: 'Clips upload and deliver automatically as soon as they are processed — no Approve click. For kiosk QR, open the project’s /kiosk page on a venue monitor.',
+    standard: 'Google Drive upload plus email. For kiosk QR, open the project’s /kiosk page on a venue monitor.',
     lan: 'Adds a guest download page served straight from this PC (QR points at its LAN address), alongside Google Drive. Set a guest PIN below, or leave it blank for no-password downloads.',
     offline: 'No internet: nothing is uploaded to Google Drive. The Wi-Fi download link is the only delivery. Set a guest PIN below, or leave it blank for no-password downloads.',
   };
