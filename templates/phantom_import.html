@@ -176,9 +176,8 @@
                    style="flex:1 1 320px" placeholder="D:\GlambotAuto_Import">
             <button type="button" class="btn btn-secondary btn-sm" id="pickFolderBtn">Choose folder…</button>
           </div>
-          <p class="field-hint">Where downloaded <code>.cine</code> files are written. Use a fast local SSD,
-            and exclude this folder from real-time antivirus scanning — on-access scanning of a multi-GB
-            <code>.cine</code> mid-write throttles the 10G transfer to a few hundred Mbps.</p>
+          <p class="field-hint">Where downloaded <code>.cine</code> files are written. Use a fast local SSD —
+            a take is several GB and lands at roughly 540 MB/s over the 10G link.</p>
           {% if not dest_exists %}
             <div class="cam-warn">This folder doesn't exist yet.
               <button type="submit" form="createDestForm" class="btn btn-secondary btn-sm">Create it</button>

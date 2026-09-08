@@ -64,9 +64,10 @@ except Exception as exc:  # pragma: no cover - depends on runtime packaging
     _IMPORT_ERROR = f"{exc.__class__.__name__}: {exc}"
 
 # UC_VIEW=1 / UC_SAVE=2 (PhFile.h). A cine handle defaults to UC_VIEW, whose read
-# pipeline is tuned for interactive playback, not a bulk camera->disk copy. PCC
-# calls PhSetUseCase(hC, UC_SAVE) before writing; pyphantom never does, which is
-# why our downloads ran at a fraction of PCC's speed. We poke PhFile.Dll directly.
+# pipeline is tuned for interactive playback rather than a bulk camera->disk copy.
+# PCC calls PhSetUseCase(hC, UC_SAVE) before writing; pyphantom has no wrapper for
+# it, so we poke PhFile.Dll directly. Measured worth ~3% (528 -> 542 MB/s), not
+# the large win it was once assumed to be - see camera_bridge/README.md.
 UC_SAVE = 2
 
 # Cine info selectors (GCI_* in PhCon.h, mirrored in pyphantom.utils).
@@ -307,10 +308,13 @@ class Bridge:
         cine = None
         try:
             cine = Cine.from_camera(self._cam, partition)
-            sec = cine.get_selector_uint(GCI_TRIGTIMESEC)
-            frac = cine.get_selector_uint(GCI_TRIGTIMEFR)
+            # pyphantom hands these back signed, so mask to the UINT the SDK
+            # actually returned - only cosmetic, but this string is the take's
+            # identity and shows up in logs.
+            sec = int(cine.get_selector_uint(GCI_TRIGTIMESEC)) & 0xFFFFFFFF
+            frac = int(cine.get_selector_uint(GCI_TRIGTIMEFR)) & 0xFFFFFFFF
             count = _safe(lambda: cine.get_selector_uint(GCI_TOTALIMAGECOUNT))
-            return f"{int(sec)}.{int(frac)}.{int(count or 0)}"
+            return f"{sec}.{frac}.{int(count or 0) & 0xFFFFFFFF}"
         except Exception as exc:  # noqa: BLE001
             # Older firmware may not answer these selectors. The importer falls
             # back to watching slot state transitions.

@@ -131,6 +131,7 @@ def _run_one(cam, partition: int, out: str, file_type: str,
                 if pct >= 100:
                     break
                 time.sleep(0.5)
+            elapsed = time.time() - t0
         else:
             # Same SDK entry point, but with no Python callback registered.
             # Progress is read off the growing file instead, which costs the
@@ -139,6 +140,7 @@ def _run_one(cam, partition: int, out: str, file_type: str,
             phDoCine(utils._phantom_keys._SaveNonBlocking, cine._cine_handle)
             stable = 0
             last = -1
+            grew_at = t0
             while True:
                 time.sleep(0.5)
                 size = os.path.getsize(out) if os.path.exists(out) else 0
@@ -151,7 +153,12 @@ def _run_one(cam, partition: int, out: str, file_type: str,
                 else:
                     stable = 0
                     last = size
-        elapsed = max(time.time() - t0, 1e-6)
+                    grew_at = time.time()
+            # Stop the clock when the file stopped growing, not when this loop
+            # noticed - otherwise the detection delay is charged to the transfer
+            # and makes the callback-free path look slower than it is.
+            elapsed = grew_at - t0
+        elapsed = max(elapsed, 1e-6)
         size = os.path.getsize(out)
         row["size_mb"] = round(size / 1e6, 1)
         row["mb_s"] = round(size / 1e6 / elapsed, 1)

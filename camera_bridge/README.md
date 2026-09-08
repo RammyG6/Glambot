@@ -35,37 +35,47 @@ camera_bridge/runtime/Scripts/pip install \
 
 ## Transfer speed
 
-PCC pulls a clip off this camera at roughly **590 MB/s (4.7 Gbps)** on the show
-PC; Glambot has trailed that. The transfer itself happens entirely inside
-`PhFile.Dll` (`PhDoCine(SaveNonBlocking)`), so there is no buffer size or socket
-option on our side to tune - only these levers:
+**Measured 2026-09-08** on the show PC, camera 25628 (VEO 4K 990S), one stored
+take of 956 frames = 10573 MB, via `spike.py --matrix`:
 
-| Lever | Where |
-|---|---|
-| `PhSetUseCase(hC, UC_SAVE)` - the bulk camera→disk pipeline. A cine handle defaults to `UC_VIEW`, tuned for interactive playback. pyphantom has no wrapper and never calls it. | `bridge.py::_set_save_use_case` |
-| Not registering pyphantom's **Python** progress callback, which the SDK's save thread invokes and which takes the GIL each time (PCC's is native). | `bridge.py::save_cine` |
-| The destination filename. The importer writes `.<name>.part` then renames, so the watcher never sees a half file - but AV exclusions are written by extension and would not cover `.part`. | `phantom_import.py::_download_partition` |
-| Antivirus. On-access scanning of a multi-GB file mid-write throttles a 10G transfer on its own. | Defender exclusion for the download folder |
+| Variant | MB/s | Gbps |
+|---|---:|---:|
+| UC_VIEW, `.cine`, progress callback (pyphantom's default) | 528 | 4.23 |
+| UC_SAVE | **542** | **4.33** |
+| UC_SAVE + `.part` filename (what the importer writes) | 542 | 4.33 |
+| UC_SAVE, no Python progress callback | 511 | 4.09 |
 
-`spike.py --matrix` runs one pull per lever against the same stored take and
-prints a comparison table, so the numbers decide rather than guesswork:
+Conclusions, which overturn the earlier guesswork in this file:
 
-```
-camera_bridge/runtime/Scripts/python.exe camera_bridge/spike.py \
-  --serial 25628 --save-partition 1 --out D:\GlambotAuto_Import\ab.cine --matrix
-```
+- **There is no large gap.** The old "~300-800 Mbps, 6x slower than PCC" figure
+  does not reproduce. Everything now lands at 4.1-4.3 Gbps.
+- `PhSetUseCase(UC_SAVE)` is worth about **+3%**, not the 6x it was assumed to
+  be. It is kept (`bridge.py::_set_save_use_case`, readback verified `=2`)
+  because it is free and it is the documented call, but it explained nothing.
+- The **`.part` filename costs nothing** - byte-identical throughput. The
+  antivirus-by-extension theory is dead; no exclusion is needed for it.
+- **Dropping the Python progress callback does not help** (511 vs 542). Do not
+  bother bypassing `save_non_blocking()` for a native progress poll; the
+  callback is not on the critical path, and it is what drives the UI.
+- For reference: `D:` sequential write measured 1026 MB/s over 2 GB, so the
+  transfer is not disk-bound either.
 
-Run it with a take actually stored on the camera (`spike.py --serial N` on its
-own is read-only and prints the partition states). `--partitions` is **opt-in
-and refused while a take is stored**: writing `PartitionsCount` re-partitions
-camera RAM and erases every stored cine, even when writing the same value.
+The remaining distance to the ~590 MB/s PCC number is under 10%, and that PCC
+figure is from an earlier session on a different clip - it was **not**
+re-measured alongside the table above, so treat it as indicative, not a target.
+To compare properly, pull the same stored take in PCC and time it.
 
-**Confirmed 2026-09-08** on the show PC, so these are no longer suspects:
-the SDK reports `has_10g=True`, `adapter='Ethernet 7'` (Marvell AQtion, linked
-at 10 Gbps) and `10g_ip='172.16.37.56'` - the same address the importer connects
-to, so the data path is genuinely 10G. A whole idle control cycle
-(connect + `get_state` + disconnect) measures **under 100 ms**, so camera reads
-are not what makes the record badge lag.
+`spike.py --serial N` on its own is read-only and prints the partition states.
+`--partitions` is **opt-in and refused while a take is stored**: writing
+`PartitionsCount` re-partitions camera RAM and erases every stored cine, even
+when writing the same value.
+
+Also confirmed on this machine, so no longer suspects: the SDK reports
+`has_10g=True`, `adapter='Ethernet 7'` (Marvell AQtion, linked at 10 Gbps) and
+`10g_ip='172.16.37.56'` - the same address the importer connects to, so the data
+path is genuinely 10G. A whole idle control cycle (connect + `get_state` +
+disconnect) measures **under 100 ms**, so camera reads are not what makes the
+record badge lag.
 
 ## Packaging
 
