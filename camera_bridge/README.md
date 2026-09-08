@@ -98,6 +98,31 @@ path is genuinely 10G. A whole idle control cycle (connect + `get_state` +
 disconnect) measures **under 100 ms**, so camera reads are not what makes the
 record badge lag.
 
+## Cancelling a download
+
+Not via `PhStopWriteCineFileAsync`. PhFile.Dll exports it and it looks like the
+obvious call, but there is no Phantom header here to check its signature
+against, and calling it on a live save coincided with the bridge process dying
+mid-transfer (which then stranded a multi-GB `.part`, because the cleanup ran
+while the dying process still held the handle).
+
+The supported route is **in-band**: the SDK's save progress callback aborts the
+transfer when it returns 0. pyphantom's `_default_progress_callback` always
+returns 1, so `bridge.py::save_cine` installs its own and starts the save with
+`phDoCine(utils._phantom_keys._SaveNonBlocking, handle)` rather than
+`cine.save_non_blocking()`. Two things to know if you touch this:
+
+- **Keep a reference to the callback** (it lives on the job record). The native
+  side holds a raw pointer to it. pyphantom passes its own without storing it.
+- `cine.save_percentage` is only updated by pyphantom's callback, so once you
+  replace it, progress has to come from your own.
+
+Measured on camera 25628: cancelling 4s into an 18.7 GB pull returned in
+**0.1s**, the file stopped growing, and the bridge process was unaffected.
+`phantom_import.cancel_active_save` still keeps a backstop - if the SDK hasn't
+taken the abort within 3s it deliberately stops the bridge, which is guaranteed
+to end the write and release the handle.
+
 ## Packaging
 
 `windows_app/glambot.spec` bundles `camera_bridge/` (including `runtime/`) as
