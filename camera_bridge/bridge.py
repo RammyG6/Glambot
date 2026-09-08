@@ -48,6 +48,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import traceback
 from typing import Any
 
@@ -58,6 +59,9 @@ sys.stdout = sys.stderr
 try:  # pyphantom is only importable under the bundled 3.11 runtime
     import pyphantom
     from pyphantom import Phantom, Camera, Cine, utils
+    # Used directly so a save can run with our own progress callback rather than
+    # pyphantom's, which always returns 1 and therefore cannot be cancelled.
+    from pyphantom.phantom import phDoCine
     _IMPORT_ERROR: str | None = None
 except Exception as exc:  # pragma: no cover - depends on runtime packaging
     pyphantom = None
@@ -101,14 +105,12 @@ def _phfile() -> Any:
         lib.PhSetUseCase.restype = ctypes.c_int
         lib.PhGetUseCase.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
         lib.PhGetUseCase.restype = ctypes.c_int
-        # Aborts an in-flight SaveNonBlocking. Optional: older SDK builds may
-        # not export it, in which case a download simply can't be cancelled.
-        try:
-            lib.PhStopWriteCineFileAsync.argtypes = [ctypes.c_void_p]
-            lib.PhStopWriteCineFileAsync.restype = ctypes.c_int
-        except AttributeError:
-            _log("PhFile.Dll has no PhStopWriteCineFileAsync - "
-                 "downloads cannot be cancelled", "warning")
+        # NB: PhFile.Dll also exports PhStopWriteCineFileAsync, which looks like
+        # the obvious way to cancel a transfer. It is deliberately NOT used:
+        # there is no Phantom header in this repo to check its signature
+        # against, and calling it on a live save is the prime suspect for
+        # killing this process mid-transfer on 2026-09-08. Cancellation goes
+        # through the save progress callback instead (see save_cine).
         _PHFILE = lib
     except Exception as exc:  # noqa: BLE001
         _log(f"could not load PhFile.Dll: {exc}", "warning")
@@ -429,22 +431,45 @@ class Bridge:
             except Exception as exc:
                 _log(f"bake {k} failed: {exc}", "warning")
 
-        rec: dict[str, Any] = {"cine": cine, "pct": 0, "path": dest,
-                               "done": False, "error": None, "cancel": False}
+        rec: dict[str, Any] = {"cine": cine, "pct": -1, "path": dest,
+                               "done": False, "error": None, "cancel": False,
+                               "aborted_in_band": False}
         self._saves[job_id] = rec
         tick = threading.Event()   # reused for the poll sleep; set() wakes it early
 
+        def _progress(_cine_handle: Any, progress: Any) -> int:
+            """The SDK's save thread calls this. Returning 0 asks it to abort,
+            which is the in-band cancel - far safer than reaching into PhFile.Dll
+            to stop a transfer that is already running."""
+            try:
+                rec["pct"] = int(progress)
+            except (TypeError, ValueError):
+                pass
+            if rec["cancel"]:
+                rec["aborted_in_band"] = True
+                return 0
+            return 1
+
+        # The native side keeps a raw pointer to this callback, so it must stay
+        # referenced for the life of the save. (pyphantom's own
+        # save_non_blocking() hands its callback over without storing it, which
+        # is a crash waiting to happen - another reason not to use it here.)
+        rec["progress_cb"] = _progress
+
         def _run() -> None:
             try:
-                cine.save_non_blocking()
+                # Deliberately not cine.save_non_blocking(): that installs
+                # pyphantom's callback, which always returns 1 and so can never
+                # be cancelled. Same SDK entry point, our own callback.
+                cine.progress_callback = _progress
+                phDoCine(utils._phantom_keys._SaveNonBlocking, cine._cine_handle)
                 last_pct = -1
                 stalled_for = 0.0
                 while True:
-                    if rec["cancel"]:
+                    if rec["cancel"] and rec["aborted_in_band"]:
                         raise RuntimeError("cancelled by operator")
-                    pct = int(getattr(cine, "save_percentage", -1))
+                    pct = int(rec["pct"])
                     if pct >= 0:
-                        rec["pct"] = pct
                         _event("save_progress", job_id=job_id, pct=pct)
                     if pct >= 100:
                         break
@@ -500,8 +525,15 @@ class Bridge:
         }
 
     def cancel_save(self, args: dict) -> dict:
-        """Abort an in-flight save. The take stays on the camera; the caller
-        discards the partial file."""
+        """Ask an in-flight save to abort. The take stays on the camera; the
+        caller discards the partial file.
+
+        The flag is what does the work: the SDK's own save thread reads it
+        through our progress callback and stops when that returns 0. This
+        returns as soon as the flag is set - whether the SDK actually honoured
+        it shows up as ``aborted``, which the caller polls before falling back
+        to restarting this process.
+        """
         job_id = str(args.get("job_id") or "")
         rec = self._saves.get(job_id)
         if rec is None or rec.get("done"):
@@ -509,28 +541,27 @@ class Bridge:
             # is what actually unblocks the operator.
             return {"job_id": job_id, "stopped": False, "reason": "no such active save"}
         rec["cancel"] = True
-        stopped = False
-        lib = _phfile()
-        cine = rec.get("cine")
-        stop_fn = getattr(lib, "PhStopWriteCineFileAsync", None) if lib else None
-        if stop_fn is not None and cine is not None:
-            try:
-                hres = stop_fn(ctypes.c_void_p(int(cine._cine_handle)))
-                stopped = hres == 0
-                _log(f"PhStopWriteCineFileAsync({job_id}) hres={hres}",
-                     "info" if stopped else "warning")
-            except Exception as exc:  # noqa: BLE001
-                _log(f"PhStopWriteCineFileAsync failed: {exc}", "warning")
-        else:
-            _log("no PhStopWriteCineFileAsync in this SDK build - the transfer "
-                 "will run to completion in the background", "warning")
         # Wake the poll loop so it reports the cancellation without waiting out
-        # its 0.5s sleep (or, if the SDK ignored us, the 90s stall detector).
+        # its 0.5s sleep.
         try:
             rec["tick"].set()
         except Exception:
             pass
-        return {"job_id": job_id, "stopped": stopped}
+        # Give the save thread a moment to reach the callback, then say whether
+        # the in-band abort took. Deliberately NOT calling
+        # PhStopWriteCineFileAsync first: its signature is a guess (no Phantom
+        # header in the repo) and calling it on a live transfer is the prime
+        # suspect for killing this process mid-save on 2026-09-08.
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if rec.get("aborted_in_band") or rec.get("done"):
+                break
+            time.sleep(0.1)
+        aborted = bool(rec.get("aborted_in_band") or rec.get("done"))
+        if not aborted:
+            _log(f"cancel_save({job_id}): SDK has not honoured the in-band abort yet; "
+                 "the caller will restart the bridge if it doesn't stop", "warning")
+        return {"job_id": job_id, "stopped": aborted, "aborted": aborted}
 
     def save_progress(self, args: dict) -> dict:
         rec = self._saves.get(str(args.get("job_id")))

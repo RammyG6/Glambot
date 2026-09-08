@@ -60,6 +60,7 @@ _SAVE_TIMEOUT = 1800.0     # ceiling for one transfer; see _await_save
 # about how often to do the *heavy* reads.
 _IDLE_POLL_SECONDS = 2.0
 _STALE_PART_AGE = 300.0    # a .part older than this can only be an orphan
+_SWEEP_EVERY = 60.0        # how often the idle loop looks for orphaned partials
 
 
 def _settings_path(inbox_dir: Path) -> Path:
@@ -144,6 +145,7 @@ class PhantomImportServer:
         self._save_events: dict[str, threading.Event] = {}
         self._save_results: dict[str, dict[str, Any]] = {}
         self._cancel_job: str | None = None
+        self._last_sweep: float = 0.0
         self._last_error: str | None = None
 
     # -- lifecycle -----------------------------------------------------
@@ -241,21 +243,32 @@ class PhantomImportServer:
         self._cancel_job = job_id
         active["cancelling"] = True
         try:
-            res = self._bridge.request("cancel_save", {"job_id": job_id}, timeout=15)
+            res = self._bridge.request("cancel_save", {"job_id": job_id}, timeout=20)
         except BridgeError as exc:
             # The worker's wait loop still ends the job, so report and move on.
             logger.warning("cancel_save failed: %s", exc)
-            res = {"stopped": False}
-        # Release the waiter now rather than letting it sit out the poll: if the
-        # SDK honoured the stop it will also emit an error event, and whichever
-        # arrives first wins.
-        self._save_results.setdefault(job_id, {"error": "cancelled by operator"})
-        ev = self._save_events.get(job_id)
-        if ev:
-            ev.set()
-        logger.info("Phantom: cancelling download %s (sdk stopped=%s)",
-                    job_id, res.get("stopped"))
-        return {"ok": True, "job_id": job_id, "sdk_stopped": bool(res.get("stopped"))}
+            res = {"aborted": False}
+
+        method = "in-band"
+        if not res.get("aborted"):
+            # The SDK didn't take the hint, so the save thread is still writing.
+            # Releasing the waiter now would race the cleanup against a live
+            # writer - which is exactly how a 1.17 GB orphan was left behind on
+            # 2026-09-08. Stopping the bridge is the one thing guaranteed to end
+            # the write and release the file handle; _on_bridge_disconnect frees
+            # every waiter and _acquire_port respawns it on the next cycle.
+            method = "bridge restart"
+            logger.warning("Phantom: in-band cancel of %s not honoured - stopping the "
+                           "camera bridge to guarantee the transfer ends", job_id)
+            self._bridge.stop()
+        else:
+            self._save_results.setdefault(job_id, {"error": "cancelled by operator"})
+            ev = self._save_events.get(job_id)
+            if ev:
+                ev.set()
+        logger.info("Phantom: cancelled download %s via %s", job_id, method)
+        return {"ok": True, "job_id": job_id, "method": method,
+                "sdk_stopped": bool(res.get("aborted"))}
 
     def queue_settings(self, fields: dict[str, Any]) -> dict[str, Any]:
         """Store live-camera changes to apply in the next Glambot-owned window.
@@ -345,6 +358,7 @@ class PhantomImportServer:
             if self._stop.is_set():
                 break
             try:
+                self._maybe_sweep_parts()
                 # Explicit work (take-complete / download-now / settings) grabs
                 # the port assertively - it may ask Chataigne to release it.
                 if self._queue or self._pending_settings:
@@ -384,6 +398,24 @@ class PhantomImportServer:
             self._refresh_camera_state(full=False)
         finally:
             self._release_port(assertive=False)
+
+    def _maybe_sweep_parts(self) -> None:
+        """Clear orphaned partials while idle.
+
+        Sweeping only at start() meant a partial stranded by a failed cleanup
+        sat there until the next restart. The mtime check in
+        _sweep_stale_parts keeps a live transfer's file safe, and the
+        _active_save guard makes that doubly true.
+        """
+        if self._active_save is not None:
+            return
+        now = time.monotonic()
+        if now - self._last_sweep < _SWEEP_EVERY:
+            return
+        self._last_sweep = now
+        dest = Path(str(self._settings.get("dest_dir", "")).strip())
+        if dest.is_dir():
+            self._sweep_stale_parts(dest)
 
     def _do_cycle(self, assertive: bool = True) -> None:
         if not self._acquire_port(assertive=assertive):
@@ -559,10 +591,7 @@ class PhantomImportServer:
             else:
                 self._last_error = f"partition {partition}: {exc}"
                 logger.error("Phantom download failed: %s", exc)
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                logger.warning("could not remove partial download %s", tmp)
+            rec["partial_removed"] = _remove_with_retry(tmp)
         finally:
             self._save_events.pop(job_id, None)
             self._save_results.pop(job_id, None)
@@ -757,6 +786,27 @@ class PhantomImportServer:
             ev.set()
         if self._save_events:
             logger.error("camera bridge went away mid-save (%s)", reason)
+
+
+def _remove_with_retry(path: Path, attempts: int = 6, delay: float = 1.0) -> bool:
+    """Delete a partial download, retrying while the writer lets go of it.
+
+    A single immediate attempt is not enough: this runs the moment the transfer
+    ends, and on Windows the SDK's (or a dying bridge process's) handle can
+    outlive that by a second or two, so the unlink fails with a sharing
+    violation and the partial is stranded until the next restart.
+    """
+    for attempt in range(attempts):
+        try:
+            path.unlink(missing_ok=True)
+            return True
+        except OSError as exc:
+            if attempt == attempts - 1:
+                logger.warning("could not remove partial download %s: %s "
+                               "(it will be swept once it goes stale)", path, exc)
+                return False
+            time.sleep(delay)
+    return False
 
 
 def _as_str_list(value: Any) -> list[str]:

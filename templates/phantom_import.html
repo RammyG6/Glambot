@@ -140,7 +140,7 @@
 
       <div class="cam-list" id="camDownloads">
         {% for d in status.downloads %}
-          <div class="{{ 'ok' if d.ok else 'err' }}">{{ d.name }}{% if d.error %} — {{ d.error }}{% elif d.mb_per_s %} — {{ d.size_mb }} MB @ {{ d.mb_per_s }} MB/s{% if d.file_type %} · {{ d.file_type }}{% if d.resolution %} {{ d.resolution }}{% endif %}{% if d.bpp %} {{ d.bpp }} bits/px{% endif %}{% endif %}{% endif %}</div>
+          <div class="{{ 'ok' if d.ok else 'err' }}">{{ d.name }}{% if d.error %} — {{ d.error }}{% if d.partial_removed is defined and not d.partial_removed %} (partial file left on disk){% endif %}{% elif d.mb_per_s %} — {{ d.size_mb }} MB @ {{ d.mb_per_s }} MB/s{% if d.file_type %} · {{ d.file_type }}{% if d.resolution %} {{ d.resolution }}{% endif %}{% if d.bpp %} {{ d.bpp }} bits/px{% endif %}{% endif %}{% endif %}</div>
         {% else %}
           <div class="muted">No downloads yet.</div>
         {% endfor %}
@@ -474,6 +474,7 @@ GET  {{ request.url_root }}phantom-import/port-owner
             var note;
             if (d.error) {
               note = ' — ' + d.error;
+              if (d.partial_removed === false) { note += ' (partial file left on disk)'; }
             } else if (d.mb_per_s) {
               note = ' — ' + d.size_mb + ' MB @ ' + d.mb_per_s + ' MB/s';
               if (d.file_type) {
