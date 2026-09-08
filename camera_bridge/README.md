@@ -45,25 +45,46 @@ take of 956 frames = 10573 MB, via `spike.py --matrix`:
 | UC_SAVE + `.part` filename (what the importer writes) | 542 | 4.33 |
 | UC_SAVE, no Python progress callback | 511 | 4.09 |
 
-Conclusions, which overturn the earlier guesswork in this file:
+### The variable that actually mattered: `file_type`
 
-- **There is no large gap.** The old "~300-800 Mbps, 6x slower than PCC" figure
-  does not reproduce. Everything now lands at 4.1-4.3 Gbps.
-- `PhSetUseCase(UC_SAVE)` is worth about **+3%**, not the 6x it was assumed to
-  be. It is kept (`bridge.py::_set_save_use_case`, readback verified `=2`)
-  because it is free and it is the documented call, but it explained nothing.
+**Read this before re-investigating transfer speed.** Every row above used
+`SVV_RAWCINE`, because that is `spike.py`'s default. Meanwhile the app was
+running with `"file_type": "SVV_CINE"` saved in
+`<inbox>/.glambot/phantom_import.json`, and pulled at roughly **544 Mbps** -
+about 8x slower, minutes instead of seconds, on an idle machine. The table
+above measured the default rather than the configuration in use, and briefly
+led to the wrong conclusion that no gap existed.
+
+- `SVV_RAWCINE` - raw packed cine, a near-straight copy of the camera's 10-bit
+  packed Bayer data. Sustains ~4.3 Gbps. **Use this.**
+- `SVV_CINE` / `SVV_TIFCINE` - the SDK demosaics and processes every frame on
+  this PC. Far more bytes and far more CPU, so the link idles waiting on
+  processing and the Ethernet graph reads a fraction of line rate.
+
+The non-raw formats are also wrong for the render pipeline:
+`effects.build_cine_source_filter` applies the camera's white-balance gains and
+a 2.2 gamma on the assumption the data is near-linear raw, so processed footage
+gets that grade double-applied - or, if the `wbgain` tags are missing, silently
+loses both the colour fix and the BT.709 output tagging.
+
+So: **when comparing against PCC, match the format on both sides**, and pass
+`spike.py --file-type` to measure whatever the app is actually configured for.
+Every download now logs its format, resolution, frame count and bits/pixel
+(raw packed lands on exactly 10.0), which is the quickest way to spot this.
+
+Secondary conclusions from the table, still valid:
+
+- `PhSetUseCase(UC_SAVE)` is worth about **+3%**. Kept
+  (`bridge.py::_set_save_use_case`, readback verified `=2`) because it is free
+  and it is the documented call, but it was never the big lever it was assumed
+  to be.
 - The **`.part` filename costs nothing** - byte-identical throughput. The
   antivirus-by-extension theory is dead; no exclusion is needed for it.
 - **Dropping the Python progress callback does not help** (511 vs 542). Do not
   bother bypassing `save_non_blocking()` for a native progress poll; the
   callback is not on the critical path, and it is what drives the UI.
-- For reference: `D:` sequential write measured 1026 MB/s over 2 GB, so the
-  transfer is not disk-bound either.
-
-The remaining distance to the ~590 MB/s PCC number is under 10%, and that PCC
-figure is from an earlier session on a different clip - it was **not**
-re-measured alongside the table above, so treat it as indicative, not a target.
-To compare properly, pull the same stored take in PCC and time it.
+- `D:` sequential write measured 1026 MB/s over 2 GB, so raw pulls are not
+  disk-bound either.
 
 `spike.py --serial N` on its own is read-only and prints the partition states.
 `--partitions` is **opt-in and refused while a take is stored**: writing

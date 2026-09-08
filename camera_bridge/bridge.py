@@ -481,7 +481,23 @@ class Bridge:
                     if v.get("done") and k != job_id][:-20]:
             self._saves.pop(old, None)
         threading.Thread(target=_run, name=f"save-{job_id}", daemon=True).start()
-        return {"job_id": job_id}
+
+        # Report what is actually being written. The format is an operator
+        # setting, and picking the processed cine over the raw one costs several
+        # times the bytes and the time - worth stating on every download rather
+        # than leaving it to be discovered by benchmarking.
+        res = _safe(lambda: cine.resolution)
+        rng = _safe(lambda: cine.recorded_range)
+        frames = None
+        if rng is not None:
+            frames = abs(int(rng.last_image) - int(rng.first_image)) + 1
+        return {
+            "job_id": job_id,
+            "file_type": getattr(ftype, "name", str(ftype)),
+            "width": _safe(lambda: int(res.x)) if res is not None else None,
+            "height": _safe(lambda: int(res.y)) if res is not None else None,
+            "frames": frames,
+        }
 
     def cancel_save(self, args: dict) -> dict:
         """Abort an in-flight save. The take stays on the camera; the caller

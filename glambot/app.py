@@ -41,6 +41,16 @@ from .emailer import EmailError, load_default_template, resolve_placeholders, se
 from .folders import all_project_dirs, group_by_folder, project_watch_dirs
 from .ftp_import import load_ftp_settings, parse_passive_ports, save_ftp_settings
 from .phantom_import import load_phantom_settings, save_phantom_settings
+
+# The save formats the camera bridge accepts, matching the page's dropdown.
+PHANTOM_FILE_TYPES = ("SVV_RAWCINE", "SVV_CINE", "SVV_TIFCINE")
+
+
+def _phantom_file_type(value: str | None) -> str:
+    """Fall back to the raw packed cine for anything unrecognised - it is both
+    the fastest off the camera and the format the grade pipeline expects."""
+    chosen = (value or "").strip().upper()
+    return chosen if chosen in PHANTOM_FILE_TYPES else "SVV_RAWCINE"
 from . import lan, nativeui
 from .processor import cancel_job, content_hash, is_footage_file
 from .qr import make_qr_data_uri, make_wifi_qr_data_uri
@@ -690,7 +700,10 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
             "camera_ip": form.get("camera_ip", "").strip(),
             "camera_serial": form.get("camera_serial", "").strip(),
             "partition_count": partition_count,
-            "file_type": form.get("file_type", "SVV_RAWCINE").strip() or "SVV_RAWCINE",
+            # Anything outside this set is either unsupported by the bridge or
+            # not what the grade pipeline reads, and used to be persisted
+            # unchecked and only fail much later, mid-download.
+            "file_type": _phantom_file_type(form.get("file_type")),
             "dest_dir": dest_dir,
             "delete_after_import": form.get("delete_after_import") == "on",
             "handoff_mode": form.get("handoff_mode", "notify").strip() or "notify",

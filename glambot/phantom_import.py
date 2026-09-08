@@ -130,6 +130,12 @@ class PhantomImportServer:
         # number is only "already done" until we next see that slot leave the
         # stored state, which is the transition that precedes a re-record.
         self._downloaded_slots: set[int] = set()
+        # Takes the operator stopped mid-download. Same two-tier keying as
+        # _downloaded, and for the same reason - without it the auto-poll sees
+        # the take still `stored` and restarts the transfer seconds later,
+        # which makes the Stop button pointless.
+        self._skipped: deque[str] = deque(maxlen=200)
+        self._skipped_slots: set[int] = set()
         self._last_take_ids: dict[int, str] = {}   # display only; see _already_downloaded
         self._pending_settings: dict[str, Any] = {}
         self._queue: deque[int | None] = deque()  # partition ints, or None = "scan all stored"
@@ -214,6 +220,11 @@ class PhantomImportServer:
         self._wake.set()
 
     def download_now(self) -> None:
+        # An explicit pull is the escape hatch for anything the operator
+        # previously stopped - otherwise a cancelled take sits on the camera
+        # with no way to fetch it.
+        self._skipped.clear()
+        self._skipped_slots.clear()
         self._queue.append(None)
         self._wake.set()
 
@@ -317,8 +328,11 @@ class PhantomImportServer:
         out = []
         for p in self._state.get("partitions", []):
             row = dict(p)
-            if p.get("state") == "stored" and self._already_downloaded(p, remembered=True):
-                row["downloaded"] = True
+            if p.get("state") == "stored":
+                if self._already_downloaded(p, remembered=True):
+                    row["downloaded"] = True
+                elif self._is_skipped(p, remembered=True):
+                    row["skipped"] = True
             out.append(row)
         return out
 
@@ -404,6 +418,10 @@ class PhantomImportServer:
                     continue  # asked for a slot that holds nothing
                 if self._already_downloaded(part):
                     continue
+                # Only the automatic poll honours a stop; an explicit request is
+                # the operator asking for it again, which overrides.
+                if not explicit and self._is_skipped(part):
+                    continue
                 self._download_partition(n, part.get("take_id"))
         finally:
             self._release_port(assertive=assertive)
@@ -439,6 +457,24 @@ class PhantomImportServer:
         else:
             self._downloaded_slots.discard(partition)
 
+    def _is_skipped(self, part: dict[str, Any], remembered: bool = False) -> bool:
+        take_id = part.get("take_id")
+        if take_id is None and remembered:
+            take_id = self._last_take_ids.get(int(part["n"]))
+        if take_id:
+            return str(take_id) in self._skipped
+        return int(part["n"]) in self._skipped_slots
+
+    def _note_skipped(self, partition: int, take_id: str | None) -> None:
+        """Don't offer this take to the automatic poll again. Deliberately
+        applied even when the SDK abort failed: the operator asked to stop, so
+        Glambot must not restart it on their behalf. ``Download now`` clears
+        this, which is how a stopped take is still retrievable."""
+        if take_id:
+            self._skipped.append(str(take_id))
+        else:
+            self._skipped_slots.add(partition)
+
     def _download_partition(self, partition: int, take_id: str | None = None) -> None:
         cfg = self._settings
         dest_dir = Path(cfg["dest_dir"])
@@ -460,12 +496,17 @@ class PhantomImportServer:
         rec = {"partition": partition, "name": final.name, "t": time.time(), "ok": False, "error": None}
         started = time.monotonic()
         try:
-            self._bridge.request("save_cine", {
+            started_info = self._bridge.request("save_cine", {
                 "partition": partition,
                 "dest_path": str(tmp),
                 "file_type": cfg.get("file_type", "SVV_RAWCINE"),
                 "job_id": job_id,
             }, timeout=30)
+            rec["file_type"] = started_info.get("file_type")
+            w, h = started_info.get("width"), started_info.get("height")
+            if w and h:
+                rec["resolution"] = f"{w}x{h}"
+            rec["frames"] = started_info.get("frames")
             self._await_save(job_id, ev)
             result = self._save_results.get(job_id, {})
             if result.get("error"):
@@ -476,14 +517,23 @@ class PhantomImportServer:
                 size = final.stat().st_size
                 rec["size_mb"] = round(size / 1e6, 1)
                 rec["mb_per_s"] = round(size / 1e6 / elapsed, 1)
+                # Bits per pixel is the one number that identifies the format at
+                # a glance: the raw packed cine lands on exactly 10.0, anything
+                # processed lands far above it.
+                if w and h and rec.get("frames"):
+                    rec["bpp"] = round(size * 8 / (w * h * rec["frames"]), 2)
             except OSError:
                 pass
             rec["ok"] = True
             self._note_downloaded(partition, take_id)
             self._downloads.appendleft(rec)
-            logger.info("Phantom: downloaded partition %s -> %s  (%.0f MB in %.1fs = %s MB/s)",
-                        partition, final.name, rec.get("size_mb") or 0, elapsed,
-                        rec.get("mb_per_s", "?"))
+            logger.info(
+                "Phantom: downloaded partition %s -> %s  (%.0f MB in %.1fs = %s MB/s; "
+                "%s %s %sf %s bits/px)",
+                partition, final.name, rec.get("size_mb") or 0, elapsed,
+                rec.get("mb_per_s", "?"), rec.get("file_type") or "?",
+                rec.get("resolution") or "?", rec.get("frames") or "?",
+                rec.get("bpp") or "?")
             self._notify_watcher()
             if cfg.get("delete_after_import"):
                 try:
@@ -501,7 +551,11 @@ class PhantomImportServer:
             rec["cancelled"] = cancelled
             self._downloads.appendleft(rec)
             if cancelled:
-                logger.info("Phantom: download of partition %s cancelled", partition)
+                # Suppress the auto-retry, or the next poll restarts the very
+                # transfer the operator just stopped.
+                self._note_skipped(partition, take_id)
+                logger.info("Phantom: download of partition %s cancelled - it will not "
+                            "download automatically; use Download now to fetch it", partition)
             else:
                 self._last_error = f"partition {partition}: {exc}"
                 logger.error("Phantom download failed: %s", exc)
@@ -621,6 +675,7 @@ class PhantomImportServer:
                 n = int(p["n"])
                 if p.get("state") != "stored":
                     self._downloaded_slots.discard(n)
+                    self._skipped_slots.discard(n)
                     self._last_take_ids.pop(n, None)
                 elif p.get("take_id"):
                     self._last_take_ids[n] = str(p["take_id"])

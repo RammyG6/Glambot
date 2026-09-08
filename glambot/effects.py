@@ -302,13 +302,21 @@ def build_cine_source_filter(input_path, ffprobe_bin: str) -> str:
             capture_output=True, text=True, timeout=15, creationflags=_NO_WINDOW_FLAGS,
         ).stdout
         tags = (json.loads(out).get("streams") or [{}])[0].get("tags", {})
-    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as exc:
+        # Silence here means the render still succeeds but comes out green and
+        # flat, with no colour tagging - worth a line in the log.
+        logger.warning("cine colour fix skipped: could not probe %s (%s)", input_path, exc)
         return ""
 
     try:
         r_gain = float(tags["wbgain[0].r"])
         b_gain = float(tags["wbgain[0].b"])
     except (KeyError, TypeError, ValueError):
+        logger.warning(
+            "cine colour fix skipped: %s has no wbgain tags. Expected for non-Phantom "
+            "footage; on a .cine it usually means the file isn't raw (check the Phantom "
+            "import File type is SVV_RAWCINE) or ffmpeg lacks the Phantom SDK.",
+            input_path)
         return ""
 
     r_gain = min(4.0, max(0.2, r_gain))

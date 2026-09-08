@@ -27,6 +27,8 @@
   .cam-part.recording { border-color: rgba(255,69,58,.4); color: var(--danger); }
   .cam-part.stored { border-color: rgba(48,209,88,.35); color: var(--success); }
   .cam-part.downloaded { opacity: .55; }
+  /* Operator stopped this one: still on the camera, but the auto-poll won't take it. */
+  .cam-part.skipped { border-style: dashed; color: var(--text-secondary); }
   .cam-kv { display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1rem;
             font-size: var(--fs-base); margin-top: .6rem; }
   .cam-kv dt { color: var(--text-secondary); }
@@ -113,8 +115,8 @@
 
       <div class="cam-parts" id="camParts">
         {% for p in status.partitions %}
-          <div class="cam-part {{ p.state }} {{ 'downloaded' if p.downloaded }}">
-            <span class="n">P{{ p.n }}</span>{{ p.state }}{{ ' ✓' if p.downloaded }}
+          <div class="cam-part {{ p.state }} {{ 'downloaded' if p.downloaded }} {{ 'skipped' if p.skipped }}">
+            <span class="n">P{{ p.n }}</span>{{ p.state }}{{ ' ✓' if p.downloaded }}{{ ' — stopped' if p.skipped }}
           </div>
         {% else %}
           <div class="field-hint">No partition data yet.</div>
@@ -129,15 +131,16 @@
           <button type="button" class="btn btn-ghost btn-sm" id="camCancelBtn">Stop download</button>
         </p>
         <div class="cam-progress"><span id="camSaveBar"></span></div>
-        <p class="field-hint" style="margin:.3rem 0 0">Stopping discards the partial file. The take stays
-          on the camera until that partition is recorded over, so you can pull it again.</p>
+        <p class="field-hint" style="margin:.3rem 0 0">Stopping discards the partial file and the take
+          <strong>won't download again automatically</strong> — press <em>Download now</em> to fetch it.
+          It stays on the camera until that partition is recorded over.</p>
       </div>
 
       {% if status.last_error %}<div class="cam-warn" id="camErr">{{ status.last_error }}</div>{% endif %}
 
       <div class="cam-list" id="camDownloads">
         {% for d in status.downloads %}
-          <div class="{{ 'ok' if d.ok else 'err' }}">{{ d.name }}{% if d.error %} — {{ d.error }}{% elif d.mb_per_s %} — {{ d.size_mb }} MB @ {{ d.mb_per_s }} MB/s{% endif %}</div>
+          <div class="{{ 'ok' if d.ok else 'err' }}">{{ d.name }}{% if d.error %} — {{ d.error }}{% elif d.mb_per_s %} — {{ d.size_mb }} MB @ {{ d.mb_per_s }} MB/s{% if d.file_type %} · {{ d.file_type }}{% if d.resolution %} {{ d.resolution }}{% endif %}{% if d.bpp %} {{ d.bpp }} bits/px{% endif %}{% endif %}{% endif %}</div>
         {% else %}
           <div class="muted">No downloads yet.</div>
         {% endfor %}
@@ -204,12 +207,21 @@
           <div class="field">
             <label for="file_type">File type</label>
             <select id="file_type" name="file_type">
-              {% for ft in ['SVV_RAWCINE', 'SVV_CINE', 'SVV_TIFCINE'] %}
-                <option value="{{ ft }}" {{ 'selected' if settings.file_type == ft }}>{{ ft }}</option>
+              {% for ft, label in [
+                   ('SVV_RAWCINE', 'SVV_RAWCINE — raw packed (fastest, what the grade expects)'),
+                   ('SVV_CINE',    'SVV_CINE — processed (much larger and slower)'),
+                   ('SVV_TIFCINE', 'SVV_TIFCINE — TIFF cine (much larger and slower)')] %}
+                <option value="{{ ft }}" {{ 'selected' if settings.file_type == ft }}>{{ label }}</option>
               {% endfor %}
             </select>
+            {% if settings.file_type != 'SVV_RAWCINE' %}
+              <div class="cam-warn">Downloads are set to <code>{{ settings.file_type }}</code>. The camera
+                sends a raw packed cine; every other format makes the SDK process each frame on this PC —
+                several times the bytes and the time, and the grade pipeline expects raw, so colour will be
+                wrong too. Use <code>SVV_RAWCINE</code> unless you have a specific reason not to.</div>
+            {% endif %}
             <p class="field-hint"><code>SVV_RAWCINE</code> keeps the raw sensor data Glambot's
-              grade pipeline expects.</p>
+              grade pipeline expects, and is a near-straight copy off the camera.</p>
           </div>
           <div class="field">
             <label for="poll_seconds">Poll interval (s)</label>
@@ -435,8 +447,10 @@ GET  {{ request.url_root }}phantom-import/port-owner
         var parts = document.getElementById('camParts');
         if (s.partitions && s.partitions.length) {
           parts.innerHTML = s.partitions.map(function (p) {
-            return '<div class="cam-part ' + p.state + (p.downloaded ? ' downloaded' : '') + '">' +
-                   '<span class="n">P' + p.n + '</span>' + p.state + (p.downloaded ? ' ✓' : '') + '</div>';
+            var cls = p.state + (p.downloaded ? ' downloaded' : '') + (p.skipped ? ' skipped' : '');
+            var mark = p.downloaded ? ' ✓' : (p.skipped ? ' — stopped' : '');
+            return '<div class="cam-part ' + cls + '">' +
+                   '<span class="n">P' + p.n + '</span>' + p.state + mark + '</div>';
           }).join('');
         }
 
@@ -457,8 +471,16 @@ GET  {{ request.url_root }}phantom-import/port-owner
         var dl = document.getElementById('camDownloads');
         if (s.downloads && s.downloads.length) {
           dl.innerHTML = s.downloads.map(function (d) {
-            var note = d.error ? ' — ' + d.error
-                     : (d.mb_per_s ? ' — ' + d.size_mb + ' MB @ ' + d.mb_per_s + ' MB/s' : '');
+            var note;
+            if (d.error) {
+              note = ' — ' + d.error;
+            } else if (d.mb_per_s) {
+              note = ' — ' + d.size_mb + ' MB @ ' + d.mb_per_s + ' MB/s';
+              if (d.file_type) {
+                note += ' · ' + d.file_type + (d.resolution ? ' ' + d.resolution : '')
+                      + (d.bpp ? ' ' + d.bpp + ' bits/px' : '');
+              }
+            } else { note = ''; }
             return '<div class="' + (d.ok ? 'ok' : 'err') + '">' + d.name + note + '</div>';
           }).join('');
         }
