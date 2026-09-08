@@ -784,6 +784,14 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         flash("Download requested - it runs on the next port handoff.", "info")
         return redirect(url_for("phantom_import_page"))
 
+    @app.post("/phantom-import/cancel-save")
+    def phantom_import_cancel_save():
+        """Abort the transfer in progress. The take stays on the camera."""
+        server = _phantom()
+        if server is None or not server.running:
+            return jsonify({"ok": False, "error": "phantom import not running"}), 503
+        return jsonify(server.cancel_active_save())
+
     @app.post("/phantom-import/open-folder")
     def phantom_import_open_folder():
         if not _phantom_local_only():

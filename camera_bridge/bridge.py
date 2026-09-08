@@ -28,12 +28,13 @@ discover                      -> {"cameras": [{"name","serial","model","cn"}]}
 connect {serial?|ip?}         -> {"cn", "serial", "ip", "model"}
 disconnect                    -> {}
 get_camera_info               -> {"ip","model","serial","firmware","partition_count", ...}
-get_state                     -> {"partitions": [{"n","state"}], "record_state": "..."}
+get_state {take_ids?}         -> {"partitions": [{"n","state","take_id"?}], "record_state": "..."}
 get_settings                  -> {"fields": {name: {"value","writable","choices"?,"min"?,"max"?}}}
 set_settings {fields:{...}}   -> {"applied": {...}, "errors": {name: "msg"}}
 set_partitions {count}        -> {"partition_count": N}
 save_cine {partition, dest_path, file_type?, first?, last?, job_id?}
                              -> {"job_id"}  (completion via save_done event)
+cancel_save {job_id}         -> {"stopped"}  (aborts an in-flight save)
 save_progress {job_id}       -> {"pct"}
 save_nvm {partition}         -> {}
 delete_cine {partition}      -> {}
@@ -67,13 +68,21 @@ except Exception as exc:  # pragma: no cover - depends on runtime packaging
 # calls PhSetUseCase(hC, UC_SAVE) before writing; pyphantom never does, which is
 # why our downloads ran at a fraction of PCC's speed. We poke PhFile.Dll directly.
 UC_SAVE = 2
+
+# Cine info selectors (GCI_* in PhCon.h, mirrored in pyphantom.utils).
+GCI_TRIGTIMESEC = 10        # trigger time, whole seconds
+GCI_TRIGTIMEFR = 11         # trigger time, fractions
+GCI_TOTALIMAGECOUNT = 30    # frames actually recorded
+GCI_WRITEERR = 109          # last error from a save on this cine
+
 _PHFILE: Any = None
 _PHFILE_TRIED = False
 
 
 def _phfile() -> Any:
     """Lazily load PhFile.Dll (the one pyphantom already bundles). Returns None
-    if it can't be loaded - callers must treat the use-case hint as best-effort."""
+    if it can't be loaded - callers must treat every entry point here as
+    best-effort; pyphantom wraps none of them."""
     global _PHFILE, _PHFILE_TRIED
     if _PHFILE_TRIED:
         return _PHFILE
@@ -91,26 +100,41 @@ def _phfile() -> Any:
         lib.PhSetUseCase.restype = ctypes.c_int
         lib.PhGetUseCase.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
         lib.PhGetUseCase.restype = ctypes.c_int
+        # Aborts an in-flight SaveNonBlocking. Optional: older SDK builds may
+        # not export it, in which case a download simply can't be cancelled.
+        try:
+            lib.PhStopWriteCineFileAsync.argtypes = [ctypes.c_void_p]
+            lib.PhStopWriteCineFileAsync.restype = ctypes.c_int
+        except AttributeError:
+            _log("PhFile.Dll has no PhStopWriteCineFileAsync - "
+                 "downloads cannot be cancelled", "warning")
         _PHFILE = lib
     except Exception as exc:  # noqa: BLE001
-        _log(f"could not load PhFile.Dll for PhSetUseCase: {exc}", "warning")
+        _log(f"could not load PhFile.Dll: {exc}", "warning")
         _PHFILE = None
     return _PHFILE
 
 
-def _set_save_use_case(cine_handle: Any) -> None:
+def _set_save_use_case(cine_handle: Any) -> bool:
+    """Put the cine handle on the bulk camera->disk pipeline. Returns whether the
+    readback confirms it - a silent no-op here is the difference between PCC's
+    throughput and a fraction of it, so the caller logs the answer either way."""
     lib = _phfile()
     if lib is None:
-        return
+        return False
     try:
         h = ctypes.c_void_p(int(cine_handle))
         hres = lib.PhSetUseCase(h, UC_SAVE)
         cur = ctypes.c_int(-1)
         lib.PhGetUseCase(h, ctypes.byref(cur))
-        _log(f"PhSetUseCase(UC_SAVE) hres={hres} use_case_now={cur.value}",
-             "info" if hres == 0 and cur.value == UC_SAVE else "warning")
+        ok = hres == 0 and cur.value == UC_SAVE
+        _log(f"PhSetUseCase(UC_SAVE) hres={hres} use_case_now={cur.value}"
+             + ("" if ok else "  <-- NOT applied; transfer will run at UC_VIEW speed"),
+             "info" if ok else "warning")
+        return ok
     except Exception as exc:  # noqa: BLE001
         _log(f"PhSetUseCase failed: {exc}", "warning")
+        return False
 
 
 _out_lock = threading.Lock()
@@ -242,15 +266,26 @@ class Bridge:
             "ethernet_10g_ip": _safe(lambda: cam.get_selector_string(1093)),
         }
 
-    def get_state(self, _args: dict) -> dict:
+    def get_state(self, args: dict) -> dict:
+        """Partition states, and optionally a fingerprint of each stored take.
+
+        ``take_ids`` is opt-in because it costs one cine handle per stored
+        partition. The importer asks for them only when it is about to decide
+        what to download; the status poll that drives the UI badge doesn't.
+        """
         cam = self._require_cam()
+        want_ids = bool(args.get("take_ids"))
         parts = []
         record_state = "unknown"
         try:
             states = cam.get_partition_state(-1)  # [(cine_nr, PartitionStateEnum)]
             for cine_nr, st in states:
+                n = int(cine_nr)
                 name = getattr(st, "name", str(st)).lower()
-                parts.append({"n": int(cine_nr), "state": name})
+                row: dict[str, Any] = {"n": n, "state": name}
+                if want_ids and name == "stored":
+                    row["take_id"] = self._take_id(n)
+                parts.append(row)
                 if name == "recording":
                     record_state = "recording"
             if record_state != "recording":
@@ -258,6 +293,35 @@ class Bridge:
         except Exception as exc:
             _log(f"get_state failed: {exc}", "warning")
         return {"partitions": parts, "record_state": record_state}
+
+    def _take_id(self, partition: int) -> str | None:
+        """Fingerprint the take currently stored in ``partition``.
+
+        Partition numbers are reused - the ring wraps every ``partition_count``
+        takes - so the slot number alone cannot distinguish a take we already
+        downloaded from a fresh one recorded into the same slot. The trigger
+        time can. Deliberately *not* cached: Glambot can't watch the slot while
+        show control holds the port, so a cached value could easily outlive the
+        take it describes, which is the exact bug this exists to prevent.
+        """
+        cine = None
+        try:
+            cine = Cine.from_camera(self._cam, partition)
+            sec = cine.get_selector_uint(GCI_TRIGTIMESEC)
+            frac = cine.get_selector_uint(GCI_TRIGTIMEFR)
+            count = _safe(lambda: cine.get_selector_uint(GCI_TOTALIMAGECOUNT))
+            return f"{int(sec)}.{int(frac)}.{int(count or 0)}"
+        except Exception as exc:  # noqa: BLE001
+            # Older firmware may not answer these selectors. The importer falls
+            # back to watching slot state transitions.
+            _log(f"take_id for partition {partition} unavailable: {exc}", "debug")
+            return None
+        finally:
+            if cine is not None:
+                try:
+                    cine.close()
+                except Exception:
+                    pass
 
     # --- settings ------------------------------------------------
 
@@ -361,8 +425,10 @@ class Bridge:
             except Exception as exc:
                 _log(f"bake {k} failed: {exc}", "warning")
 
-        rec = {"cine": cine, "pct": 0, "path": dest, "done": False, "error": None}
+        rec: dict[str, Any] = {"cine": cine, "pct": 0, "path": dest,
+                               "done": False, "error": None, "cancel": False}
         self._saves[job_id] = rec
+        tick = threading.Event()   # reused for the poll sleep; set() wakes it early
 
         def _run() -> None:
             try:
@@ -370,6 +436,8 @@ class Bridge:
                 last_pct = -1
                 stalled_for = 0.0
                 while True:
+                    if rec["cancel"]:
+                        raise RuntimeError("cancelled by operator")
                     pct = int(getattr(cine, "save_percentage", -1))
                     if pct >= 0:
                         rec["pct"] = pct
@@ -382,25 +450,67 @@ class Bridge:
                         stalled_for += 0.5
                         if stalled_for >= 90:
                             raise RuntimeError(
-                                f"save stalled at {pct}% for 90s - no progress from the SDK")
+                                f"save stalled at {pct}% for 90s - no progress from the SDK"
+                                + _write_err_suffix(cine))
                     else:
                         stalled_for = 0.0
                         last_pct = pct
-                    threading.Event().wait(0.5)
+                    tick.wait(0.5)
+                    tick.clear()
                 rec["done"] = True
                 _event("save_done", job_id=job_id, path=dest)
             except Exception as exc:  # noqa: BLE001
                 rec["error"] = str(exc)
                 rec["done"] = True
-                _event("error", job_id=job_id, error=f"save failed: {exc}")
+                _event("error", job_id=job_id,
+                       error=f"save failed: {exc}", cancelled=bool(rec["cancel"]))
             finally:
                 try:
                     cine.close()
                 except Exception:
                     pass
+                rec["cine"] = None   # drop the SDK handle; save_progress still answers
 
+        rec["tick"] = tick
+        # Keep the finished-job tail bounded.
+        for old in [k for k, v in list(self._saves.items())
+                    if v.get("done") and k != job_id][:-20]:
+            self._saves.pop(old, None)
         threading.Thread(target=_run, name=f"save-{job_id}", daemon=True).start()
         return {"job_id": job_id}
+
+    def cancel_save(self, args: dict) -> dict:
+        """Abort an in-flight save. The take stays on the camera; the caller
+        discards the partial file."""
+        job_id = str(args.get("job_id") or "")
+        rec = self._saves.get(job_id)
+        if rec is None or rec.get("done"):
+            # Already finished - nothing to stop, and the caller's own wait loop
+            # is what actually unblocks the operator.
+            return {"job_id": job_id, "stopped": False, "reason": "no such active save"}
+        rec["cancel"] = True
+        stopped = False
+        lib = _phfile()
+        cine = rec.get("cine")
+        stop_fn = getattr(lib, "PhStopWriteCineFileAsync", None) if lib else None
+        if stop_fn is not None and cine is not None:
+            try:
+                hres = stop_fn(ctypes.c_void_p(int(cine._cine_handle)))
+                stopped = hres == 0
+                _log(f"PhStopWriteCineFileAsync({job_id}) hres={hres}",
+                     "info" if stopped else "warning")
+            except Exception as exc:  # noqa: BLE001
+                _log(f"PhStopWriteCineFileAsync failed: {exc}", "warning")
+        else:
+            _log("no PhStopWriteCineFileAsync in this SDK build - the transfer "
+                 "will run to completion in the background", "warning")
+        # Wake the poll loop so it reports the cancellation without waiting out
+        # its 0.5s sleep (or, if the SDK ignored us, the 90s stall detector).
+        try:
+            rec["tick"].set()
+        except Exception:
+            pass
+        return {"job_id": job_id, "stopped": stopped}
 
     def save_progress(self, args: dict) -> dict:
         rec = self._saves.get(str(args.get("job_id")))
@@ -434,6 +544,13 @@ def _safe(fn: Any) -> Any:
         return fn()
     except Exception:
         return None
+
+
+def _write_err_suffix(cine: Any) -> str:
+    """GCI_WRITEERR holds the SDK's own reason a save died - far more useful in
+    a log than the percentage it happened to stop at."""
+    err = _safe(lambda: cine.get_selector_int(GCI_WRITEERR))
+    return f" (SDK write error {err})" if err else ""
 
 
 def _coerce(value: Any, kind: str) -> Any:

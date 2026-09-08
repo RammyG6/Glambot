@@ -70,9 +70,14 @@ class PhantomBridge:
     (the PhantomImportServer state machine does).
     """
 
-    def __init__(self, on_event: Callable[[dict[str, Any]], None] | None = None):
+    def __init__(self, on_event: Callable[[dict[str, Any]], None] | None = None,
+                 on_disconnect: Callable[[str], None] | None = None):
         self._proc: subprocess.Popen[str] | None = None
         self._on_event = on_event
+        # Called once when the child's stdout closes - i.e. it exited, cleanly
+        # or by crashing. Async work waiting on an event that will now never
+        # arrive (a save in flight) has no other way to learn about it.
+        self._on_disconnect = on_disconnect
         self._next_id = 1
         self._pending: dict[int, dict[str, Any]] = {}
         self._pending_lock = threading.Lock()
@@ -140,11 +145,7 @@ class PhantomBridge:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-        # Fail any in-flight waiters.
-        with self._pending_lock:
-            for rid, ev in list(self._replies.items()):
-                self._results[rid] = {"ok": False, "error": "bridge stopped"}
-                ev.set()
+        self._fail_inflight("bridge stopped")
 
     # -- requests --------------------------------------------------
 
@@ -201,6 +202,22 @@ class PhantomBridge:
             if ev is not None:
                 ev.set()
         logger.info("camera bridge stdout closed")
+        self._fail_inflight("camera bridge exited")
+
+    def _fail_inflight(self, reason: str) -> None:
+        """Release everything blocked on this bridge. Without it a caller
+        waiting on an async save event waits out its full timeout."""
+        with self._pending_lock:
+            waiters = list(self._replies.items())
+            for rid, _ev in waiters:
+                self._results[rid] = {"ok": False, "error": reason}
+        for _rid, ev in waiters:
+            ev.set()
+        if self._on_disconnect is not None:
+            try:
+                self._on_disconnect(reason)
+            except Exception:
+                logger.exception("phantom bridge disconnect handler failed")
 
     def _handle_event(self, msg: dict[str, Any]) -> None:
         kind = msg.get("event")
@@ -226,4 +243,6 @@ class PhantomBridge:
             return
         for line in proc.stderr:
             if line.strip():
-                logger.debug("[bridge stderr] %s", line.rstrip())
+                # WARNING, not DEBUG: a native PhPy.pyd crash writes its only
+                # trace here, and it is invisible at the default log level.
+                logger.warning("[bridge stderr] %s", line.rstrip())

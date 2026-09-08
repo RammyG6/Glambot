@@ -18,6 +18,8 @@
   .cam-badge.recording { color: var(--danger); border-color: rgba(255,69,58,.4); background: var(--danger-bg); }
   .cam-badge.stored    { color: var(--success); border-color: rgba(48,209,88,.35); background: var(--success-bg); }
   .cam-badge.ready     { color: var(--text-secondary); }
+  /* Couldn't be refreshed (the camera port is busy) - don't present it as live. */
+  .cam-badge.stale     { opacity: .45; font-style: italic; }
   .cam-parts { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .8rem; }
   .cam-part { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .4rem .7rem;
               font-size: var(--fs-xs); min-width: 5.5rem; text-align: center; }
@@ -120,10 +122,15 @@
       </div>
 
       <div id="camSaveWrap" {{ '' if status.active_save else 'hidden' }}>
-        <p class="field-hint" style="margin:.7rem 0 0">Saving partition
-          <span id="camSavePart">{{ status.active_save.partition if status.active_save }}</span>…
-          <span id="camSavePct">{{ status.active_save.pct if status.active_save }}</span>%</p>
+        <p class="field-hint" style="margin:.7rem 0 0; display:flex; align-items:center; gap:.6rem">
+          <span>Saving partition
+            <span id="camSavePart">{{ status.active_save.partition if status.active_save }}</span>…
+            <span id="camSavePct">{{ status.active_save.pct if status.active_save }}</span>%</span>
+          <button type="button" class="btn btn-ghost btn-sm" id="camCancelBtn">Stop download</button>
+        </p>
         <div class="cam-progress"><span id="camSaveBar"></span></div>
+        <p class="field-hint" style="margin:.3rem 0 0">Stopping discards the partial file. The take stays
+          on the camera until that partition is recorded over, so you can pull it again.</p>
       </div>
 
       {% if status.last_error %}<div class="cam-warn" id="camErr">{{ status.last_error }}</div>{% endif %}
@@ -413,10 +420,18 @@ GET  {{ request.url_root }}phantom-import/port-owner
         if (Array.isArray(s.quick_settings)) quickSettings = s.quick_settings;
         if (typeof s.auto_download === 'boolean') syncDlToggle(s.auto_download);
 
+        // A reading Glambot couldn't refresh (show control is holding the
+        // camera port) is shown as stale rather than as current — a confident
+        // READY while the camera is actually rolling is worse than a grey one.
         var badge = document.getElementById('camRecBadge');
         var rs = (s.record_state || 'unknown');
-        badge.className = 'cam-badge ' + rs;
+        var stale = s.running && (s.state_age_s === null || s.state_age_s > 10);
+        badge.className = 'cam-badge ' + rs + (stale ? ' stale' : '');
         badge.textContent = rs.toUpperCase();
+        badge.title = stale
+          ? 'Last read ' + (s.state_age_s === null ? 'never' : s.state_age_s + 's ago')
+            + ' — the camera port is busy, so this may be out of date.'
+          : 'Read ' + (s.state_age_s || 0) + 's ago';
 
         var parts = document.getElementById('camParts');
         if (s.partitions && s.partitions.length) {
@@ -433,6 +448,11 @@ GET  {{ request.url_root }}phantom-import/port-owner
           setText('camSavePct', s.active_save.pct);
           var bar = document.getElementById('camSaveBar');
           if (bar) bar.style.width = (s.active_save.pct || 0) + '%';
+          var cb = document.getElementById('camCancelBtn');
+          if (cb) {
+            cb.disabled = !!s.active_save.cancelling;
+            cb.textContent = s.active_save.cancelling ? 'Stopping…' : 'Stop download';
+          }
         } else { sw.hidden = true; }
 
         var dl = document.getElementById('camDownloads');
@@ -465,8 +485,29 @@ GET  {{ request.url_root }}phantom-import/port-owner
       })
       .catch(function () {});
   }
-  setInterval(poll, 3000);
-  poll();
+  var cancelBtn = document.getElementById('camCancelBtn');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', function () {
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = 'Stopping…';
+      fetch('{{ url_for("phantom_import_cancel_save") }}', { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .catch(function () { return {}; })
+        .then(function () { poll(); });
+    });
+  }
+
+  // The record badge is only as fresh as this interval, so poll briskly while
+  // someone is looking and not at all when they aren't.
+  var timer = null;
+  function schedule() {
+    if (timer) { clearInterval(timer); timer = null; }
+    if (document.visibilityState === 'hidden') return;
+    timer = setInterval(poll, 1000);
+    poll();
+  }
+  document.addEventListener('visibilitychange', schedule);
+  schedule();
 })();
 </script>
 </body>

@@ -52,6 +52,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 _CINE_SUFFIX = ".cine"
+_PART_SUFFIX = ".part"
+_SAVE_TIMEOUT = 1800.0     # ceiling for one transfer; see _await_save
+# A whole idle cycle (connect + get_state + disconnect) measures well under
+# 100 ms against a VEO 4K, so the record badge's freshness is set by this sleep
+# and nothing else. Kept independent of the operator's poll_seconds, which is
+# about how often to do the *heavy* reads.
+_IDLE_POLL_SECONDS = 2.0
+_STALE_PART_AGE = 300.0    # a .part older than this can only be an orphan
 
 
 def _settings_path(inbox_dir: Path) -> Path:
@@ -100,7 +108,8 @@ class PhantomImportServer:
     def __init__(self, inbox_dir: Path, watcher: Any = None):
         self.inbox_dir = Path(inbox_dir)
         self.watcher = watcher
-        self._bridge = PhantomBridge(on_event=self._on_bridge_event)
+        self._bridge = PhantomBridge(on_event=self._on_bridge_event,
+                                     on_disconnect=self._on_bridge_disconnect)
         self._lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self._stop = threading.Event()
@@ -111,13 +120,24 @@ class PhantomImportServer:
         self._camera_info: dict[str, Any] = {}
         self._live_settings: dict[str, Any] = {}
         self._state: dict[str, Any] = {"partitions": [], "record_state": "unknown"}
-        self._downloaded: set[int] = set()     # partitions already pulled this session
+        self._state_at: float = 0.0            # monotonic stamp of the last camera read
+        # Takes already pulled, by camera-reported fingerprint (trigger time +
+        # frame count). Keyed by take rather than by partition number: the ring
+        # reuses partition numbers every `partition_count` takes, so a
+        # partition-keyed set silently stops downloading once it has wrapped.
+        self._downloaded: deque[str] = deque(maxlen=200)
+        # Fallback for firmware that won't report a fingerprint: a partition
+        # number is only "already done" until we next see that slot leave the
+        # stored state, which is the transition that precedes a re-record.
+        self._downloaded_slots: set[int] = set()
+        self._last_take_ids: dict[int, str] = {}   # display only; see _already_downloaded
         self._pending_settings: dict[str, Any] = {}
         self._queue: deque[int | None] = deque()  # partition ints, or None = "scan all stored"
         self._downloads: deque[dict[str, Any]] = deque(maxlen=50)
         self._active_save: dict[str, Any] | None = None
         self._save_events: dict[str, threading.Event] = {}
         self._save_results: dict[str, dict[str, Any]] = {}
+        self._cancel_job: str | None = None
         self._last_error: str | None = None
 
     # -- lifecycle -----------------------------------------------------
@@ -137,6 +157,7 @@ class PhantomImportServer:
                 return "No download folder set."
             if not dest.is_dir():
                 return f"Download folder does not exist: {dest}"
+            self._sweep_stale_parts(dest)
 
             err = self._bridge.start()
             if err:
@@ -196,6 +217,35 @@ class PhantomImportServer:
         self._queue.append(None)
         self._wake.set()
 
+    def cancel_active_save(self) -> dict[str, Any]:
+        """Abort the transfer in progress and discard the partial file.
+
+        The take stays on the camera, so it can be pulled again later - it is
+        still protected by the partition ring until that slot is re-recorded.
+        """
+        active = self._active_save
+        if not active:
+            return {"ok": False, "error": "no download in progress"}
+        job_id = str(active.get("job_id"))
+        self._cancel_job = job_id
+        active["cancelling"] = True
+        try:
+            res = self._bridge.request("cancel_save", {"job_id": job_id}, timeout=15)
+        except BridgeError as exc:
+            # The worker's wait loop still ends the job, so report and move on.
+            logger.warning("cancel_save failed: %s", exc)
+            res = {"stopped": False}
+        # Release the waiter now rather than letting it sit out the poll: if the
+        # SDK honoured the stop it will also emit an error event, and whichever
+        # arrives first wins.
+        self._save_results.setdefault(job_id, {"error": "cancelled by operator"})
+        ev = self._save_events.get(job_id)
+        if ev:
+            ev.set()
+        logger.info("Phantom: cancelling download %s (sdk stopped=%s)",
+                    job_id, res.get("stopped"))
+        return {"ok": True, "job_id": job_id, "sdk_stopped": bool(res.get("stopped"))}
+
     def queue_settings(self, fields: dict[str, Any]) -> dict[str, Any]:
         """Store live-camera changes to apply in the next Glambot-owned window.
 
@@ -229,6 +279,7 @@ class PhantomImportServer:
             "port_owner": self._owner,
             "camera": self._camera_info,
             "record_state": self._state.get("record_state"),
+            "state_age_s": self._state_age(),
             "partitions": self._mark_partitions(),
             "live_settings": self._live_settings,
             "pending_settings": dict(self._pending_settings),
@@ -240,11 +291,21 @@ class PhantomImportServer:
             "settings": {k: cfg.get(k) for k in DEFAULT_SETTINGS if k != "camera_serial" or cfg.get(k)},
         }
 
+    def _state_age(self) -> float | None:
+        """Seconds since the camera state was last actually read. The page uses
+        it to mark a reading stale rather than showing a frozen one as current -
+        while show control holds the port, Glambot cannot read the camera at
+        all, and a confidently wrong READY badge is worse than a greyed one."""
+        if not self._state_at:
+            return None
+        return round(time.monotonic() - self._state_at, 1)
+
     def camera_json(self) -> dict[str, Any]:
         return {
             "port_owner": self._owner,
             "camera": self._camera_info,
             "record_state": self._state.get("record_state"),
+            "state_age_s": self._state_age(),
             "partitions": self._mark_partitions(),
             "live_settings": self._live_settings,
             "pending_settings": dict(self._pending_settings),
@@ -256,7 +317,7 @@ class PhantomImportServer:
         out = []
         for p in self._state.get("partitions", []):
             row = dict(p)
-            if int(p.get("n", -1)) in self._downloaded:
+            if p.get("state") == "stored" and self._already_downloaded(p, remembered=True):
                 row["downloaded"] = True
             out.append(row)
         return out
@@ -264,9 +325,8 @@ class PhantomImportServer:
     # -- worker loop --------------------------------------------
 
     def _run(self) -> None:
-        poll = max(2, int(self._settings.get("poll_seconds", 5)))
         while not self._stop.is_set():
-            self._wake.wait(timeout=poll)
+            self._wake.wait(timeout=self._poll_interval())
             self._wake.clear()
             if self._stop.is_set():
                 break
@@ -280,11 +340,36 @@ class PhantomImportServer:
                 # interrupt a recording or nag show-control.
                 elif self._settings.get("auto_download", True) and self._active_save is None:
                     self._do_cycle(assertive=False)
-                else:
-                    continue
+                # In Manual mode nobody would otherwise read the camera, so the
+                # record badge would sit frozen. Take a status-only look.
+                elif self._active_save is None:
+                    self._status_cycle()
             except Exception:  # noqa: BLE001
                 logger.exception("phantom import cycle failed")
                 self._last_error = "cycle error - see logs"
+
+    def _poll_interval(self) -> float:
+        """How long to sleep between cycles.
+
+        ``poll_seconds`` is the operator's setting for how hard to work the
+        camera, but the record badge is only as fresh as this interval, so idle
+        cycles run faster than the configured value. During a transfer nothing
+        useful happens here anyway.
+        """
+        configured = max(2.0, float(self._settings.get("poll_seconds", 5) or 5))
+        if self._active_save is not None:
+            return configured
+        return min(configured, _IDLE_POLL_SECONDS)
+
+    def _status_cycle(self) -> None:
+        """Refresh the camera state and nothing else, without disturbing show
+        control - if the port isn't free right now, try again next tick."""
+        if not self._acquire_port(assertive=False):
+            return
+        try:
+            self._refresh_camera_state(full=False)
+        finally:
+            self._release_port(assertive=False)
 
     def _do_cycle(self, assertive: bool = True) -> None:
         if not self._acquire_port(assertive=assertive):
@@ -294,7 +379,7 @@ class PhantomImportServer:
         try:
             if self._pending_settings:
                 self._apply_pending_settings()
-            self._refresh_camera_state()
+            self._refresh_camera_state(take_ids=True)
 
             if not assertive and self._state.get("record_state") == "recording":
                 return  # don't pull mid-record; the finally still releases the port
@@ -307,27 +392,71 @@ class PhantomImportServer:
                     continue
                 explicit = True
                 wanted.append(int(item))
-            stored = [int(p["n"]) for p in self._state.get("partitions", [])
-                      if p.get("state") == "stored" and int(p["n"]) not in self._downloaded]
-            targets = [n for n in (wanted or stored) if n not in self._downloaded]
-            if explicit:
-                targets = [n for n in targets if n in wanted or n in stored]
-            for n in targets:
-                self._download_partition(n)
+
+            by_n = {int(p["n"]): p for p in self._state.get("partitions", [])
+                    if p.get("state") == "stored"}
+            # An explicit request names partitions; otherwise take every stored
+            # one. Either way the pending filter decides what's actually new.
+            candidates = wanted if explicit else sorted(by_n)
+            for n in candidates:
+                part = by_n.get(n)
+                if part is None:
+                    continue  # asked for a slot that holds nothing
+                if self._already_downloaded(part):
+                    continue
+                self._download_partition(n, part.get("take_id"))
         finally:
             self._release_port(assertive=assertive)
 
-    def _download_partition(self, partition: int) -> None:
+    def _already_downloaded(self, part: dict[str, Any], remembered: bool = False) -> bool:
+        """Whether this stored take has been pulled.
+
+        ``remembered`` lets the *display* fall back to the last fingerprint seen
+        for the slot, because the cheap status read doesn't ask for take ids.
+        The download decision never does that: acting on a stale fingerprint
+        would skip a real take, which is the failure this whole scheme exists
+        to prevent, so an unknown id there means "download it".
+        """
+        take_id = part.get("take_id")
+        if take_id is None and remembered:
+            take_id = self._last_take_ids.get(int(part["n"]))
+        if take_id:
+            return str(take_id) in self._downloaded
+        return int(part["n"]) in self._downloaded_slots
+
+    def _note_downloaded(self, partition: int, take_id: str | None) -> None:
+        if take_id:
+            self._downloaded.append(str(take_id))
+        else:
+            self._downloaded_slots.add(partition)
+
+    def _forget_downloaded(self, partition: int, take_id: str | None) -> None:
+        if take_id:
+            try:
+                self._downloaded.remove(str(take_id))
+            except ValueError:
+                pass
+        else:
+            self._downloaded_slots.discard(partition)
+
+    def _download_partition(self, partition: int, take_id: str | None = None) -> None:
         cfg = self._settings
         dest_dir = Path(cfg["dest_dir"])
         stamp = time.strftime("%Y%m%d-%H%M%S")
         serial = self._camera_info.get("serial") or "phantom"
         final = dest_dir / f"{serial}_p{partition}_{stamp}{_CINE_SUFFIX}"
-        tmp = dest_dir / f".{final.stem}.part"
+        # The stamp only resolves to the second, so two takes pulled from the
+        # same partition inside one second would otherwise silently overwrite.
+        dedupe = 1
+        while final.exists():
+            final = dest_dir / f"{serial}_p{partition}_{stamp}-{dedupe}{_CINE_SUFFIX}"
+            dedupe += 1
+        tmp = dest_dir / f".{final.stem}{_PART_SUFFIX}"
         job_id = f"p{partition}-{stamp}"
         ev = threading.Event()
         self._save_events[job_id] = ev
-        self._active_save = {"partition": partition, "job_id": job_id, "pct": 0, "path": str(final)}
+        self._active_save = {"partition": partition, "job_id": job_id, "pct": 0,
+                             "path": str(final), "cancelling": False}
         rec = {"partition": partition, "name": final.name, "t": time.time(), "ok": False, "error": None}
         started = time.monotonic()
         try:
@@ -337,9 +466,7 @@ class PhantomImportServer:
                 "file_type": cfg.get("file_type", "SVV_RAWCINE"),
                 "job_id": job_id,
             }, timeout=30)
-            # Wait for the save_done / error event (large cines take a while).
-            if not ev.wait(timeout=1800):
-                raise BridgeError("save timed out after 30 min")
+            self._await_save(job_id, ev)
             result = self._save_results.get(job_id, {})
             if result.get("error"):
                 raise BridgeError(result["error"])
@@ -352,7 +479,7 @@ class PhantomImportServer:
             except OSError:
                 pass
             rec["ok"] = True
-            self._downloaded.add(partition)
+            self._note_downloaded(partition, take_id)
             self._downloads.appendleft(rec)
             logger.info("Phantom: downloaded partition %s -> %s  (%.0f MB in %.1fs = %s MB/s)",
                         partition, final.name, rec.get("size_mb") or 0, elapsed,
@@ -361,22 +488,52 @@ class PhantomImportServer:
             if cfg.get("delete_after_import"):
                 try:
                     self._bridge.request("delete_cine", {"partition": partition})
-                    self._downloaded.discard(partition)
+                    self._forget_downloaded(partition, take_id)
                 except BridgeError as exc:
                     logger.warning("delete_cine %s failed: %s", partition, exc)
-        except BridgeError as exc:
-            rec["error"] = str(exc)
+        # OSError matters as much as BridgeError here: os.replace routinely
+        # fails on Windows when AV or the indexer holds the new file for a
+        # moment, and letting it escape leaves the .part behind and re-pulls the
+        # whole multi-GB cine on the next cycle.
+        except (BridgeError, OSError) as exc:
+            cancelled = self._cancel_job == job_id
+            rec["error"] = "cancelled by operator" if cancelled else str(exc)
+            rec["cancelled"] = cancelled
             self._downloads.appendleft(rec)
-            self._last_error = f"partition {partition}: {exc}"
-            logger.error("Phantom download failed: %s", exc)
+            if cancelled:
+                logger.info("Phantom: download of partition %s cancelled", partition)
+            else:
+                self._last_error = f"partition {partition}: {exc}"
+                logger.error("Phantom download failed: %s", exc)
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:
-                pass
+                logger.warning("could not remove partial download %s", tmp)
         finally:
             self._save_events.pop(job_id, None)
             self._save_results.pop(job_id, None)
+            if self._cancel_job == job_id:
+                self._cancel_job = None
             self._active_save = None
+
+    def _await_save(self, job_id: str, ev: threading.Event) -> None:
+        """Block until the save reports back, but never past the point where a
+        report can still arrive.
+
+        The completion event is only ever set by a ``save_done``/``error``
+        message from the bridge. If the bridge process dies mid-transfer no such
+        message is ever sent, so waiting the full ceiling in one call would park
+        the single worker thread - and with it all polling and every later
+        download - until it expired. Short waits, re-checking liveness.
+        """
+        deadline = time.monotonic() + _SAVE_TIMEOUT
+        while not ev.wait(timeout=1.0):
+            if self._stop.is_set():
+                raise BridgeError("shutting down")
+            if not self._bridge.running:
+                raise BridgeError("camera bridge exited during save")
+            if time.monotonic() >= deadline:
+                raise BridgeError(f"save timed out after {_SAVE_TIMEOUT / 60:.0f} min")
 
     # -- port handoff ------------------------------------------
 
@@ -392,7 +549,14 @@ class PhantomImportServer:
         for attempt in range(attempts):
             try:
                 if not self._bridge.running:
-                    if self._bridge.start():
+                    start_err = self._bridge.start()
+                    if start_err:
+                        # A bridge that can no longer start never recovers on
+                        # its own, so this must be visible even on the quiet
+                        # opportunistic path - otherwise auto-download just
+                        # stops with nothing on the page to say why.
+                        self._last_error = f"camera bridge: {start_err}"
+                        logger.warning("camera bridge failed to start: %s", start_err)
                         if assertive:
                             time.sleep(1.0)
                             continue
@@ -438,11 +602,32 @@ class PhantomImportServer:
 
     # -- camera reads -----------------------------------------
 
-    def _refresh_camera_state(self) -> None:
+    def _refresh_camera_state(self, take_ids: bool = False, full: bool = True) -> None:
+        """Read the camera.
+
+        ``full=False`` is the status path: one round-trip for the partition
+        states behind the record badge. The settings and camera-info reads cost
+        two more and only change when the operator changes them, so the routine
+        poll skips them - that is most of the latency between pressing record
+        and the page showing it.
+        """
         try:
-            self._state = self._bridge.request("get_state")
+            self._state = self._bridge.request("get_state", {"take_ids": take_ids})
+            self._state_at = time.monotonic()
+            # A slot that is no longer stored is about to hold a different take,
+            # so anything we remembered against its number is spent. Only
+            # matters when the camera won't give us a take_id.
+            for p in self._state.get("partitions", []):
+                n = int(p["n"])
+                if p.get("state") != "stored":
+                    self._downloaded_slots.discard(n)
+                    self._last_take_ids.pop(n, None)
+                elif p.get("take_id"):
+                    self._last_take_ids[n] = str(p["take_id"])
         except BridgeError as exc:
             logger.debug("get_state failed: %s", exc)
+        if not full:
+            return
         try:
             self._live_settings = self._bridge.request("get_settings").get("fields", {})
         except BridgeError as exc:
@@ -465,6 +650,19 @@ class PhantomImportServer:
             save_phantom_settings(self.inbox_dir, {"partition_count": res["applied"]["partition_count"]})
         self._refresh_camera_state()
         return res
+
+    @staticmethod
+    def _sweep_stale_parts(dest: Path) -> None:
+        """Drop partial downloads orphaned by a killed process. Only ones old
+        enough that no live transfer could still be writing them."""
+        cutoff = time.time() - _STALE_PART_AGE
+        for leftover in dest.glob(f".*{_PART_SUFFIX}"):
+            try:
+                if leftover.stat().st_mtime < cutoff:
+                    leftover.unlink()
+                    logger.info("Phantom: removed orphaned partial %s", leftover.name)
+            except OSError as exc:
+                logger.warning("could not remove %s: %s", leftover, exc)
 
     def _notify_watcher(self) -> None:
         if self.watcher is not None:
@@ -494,6 +692,16 @@ class PhantomImportServer:
                 if ev:
                     ev.set()
             self._last_error = str(msg.get("error"))
+
+    def _on_bridge_disconnect(self, reason: str) -> None:
+        """The bridge process is gone. Anything waiting on a save event from it
+        will otherwise wait for the full ceiling, which parks the worker thread
+        and stops auto-download until Glambot is restarted."""
+        for job_id, ev in list(self._save_events.items()):
+            self._save_results.setdefault(job_id, {"error": reason})
+            ev.set()
+        if self._save_events:
+            logger.error("camera bridge went away mid-save (%s)", reason)
 
 
 def _as_str_list(value: Any) -> list[str]:
