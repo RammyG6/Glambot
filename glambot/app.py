@@ -28,6 +28,7 @@ from werkzeug.utils import secure_filename
 from .config import (
     AUDIO_EXTENSIONS,
     EMAIL_RE,
+    VALID_COLOR_PROFILES,
     ConfigError,
     extract_drive_folder_id,
     load_config,
@@ -325,6 +326,12 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
             "live_id": state["live_job_id"] if state["live_job_id"] in visible_ids else None,
             "paused": state["paused"],
             "has_more": len(delivered) > count,
+            # The playback reel is deliberately NOT `clips`: that list is capped
+            # at the grid size because every tile carries a generated QR code,
+            # and the panel would then only ever cycle the newest handful. This
+            # is every delivered clip, newest-first, ids and names only - cheap
+            # next to the QR payload above. Same reel playback.json serves.
+            "reel": [{"id": j.id, "filename": j.filename} for j in delivered],
             "clips": [
                 {"id": j.id, "filename": j.filename,
                  "qr": make_qr_data_uri(_guest_or_drive_link(j)),
@@ -1912,6 +1919,7 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
 
     def _do_preview(sample_path: Path, form, source_fps: float | None = None,
                     trim_start: str | None = None, trim_end: str | None = None,
+                    color_profile: str = "camera",
                     ) -> tuple[str | None, float | None, str | None]:
         from .processor import (_resolve_ffmpeg, _probe_duration, _effective_duration,
                                 _FFPROBE)
@@ -1938,12 +1946,13 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         full_dur = full_dur or _probe_duration(sample_path) or 6.0
         dur = min(6.0, full_dur)
 
-        # Raw Phantom .cine: neutralise the green/flat Bayer decode before the
+        # Raw Phantom .cine: reproduce the camera's own colour before the
         # ramp/grade chain, exactly as build_ffmpeg_cmd() does for the real render.
         cine_fix = ""
         if sample_path.suffix.lower() == ".cine":
             # Same base look as the real render, or the preview misrepresents it.
-            cine_fix = build_cine_source_filter(sample_path, _FFPROBE)
+            cine_fix = build_cine_source_filter(
+                sample_path, _FFPROBE, profile=form.get("color_profile") or color_profile)
 
         grade = Grade(**advanced["grade"]) if advanced["grade"] else None
         ramp = None
@@ -2020,15 +2029,18 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         else:
             return jsonify({"ok": False, "error": "Sample clip not found."}), 400
         from .processor import _effective_source_fps
+        profile = "camera"
         try:
             _cfg = load_config(project_dir)
             trim = _cfg.trim_for(target)
             src_fps = _effective_source_fps(sample_path, _cfg.source_fps)
+            profile = _cfg.color_profile
         except ConfigError:
             trim, src_fps = None, _effective_source_fps(sample_path, None)
         name, duration, err = _do_preview(
             sample_path, request.form, source_fps=src_fps,
-            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None))
+            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None),
+            color_profile=profile)
         if err:
             return jsonify({"ok": False, "error": err}), 400
         return jsonify({"ok": True, "url": url_for("serve_preview", project=project, name=name),
@@ -2049,7 +2061,8 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_serv
         src_fps = _effective_source_fps(sample_path, config.source_fps)
         name, duration, err = _do_preview(
             sample_path, request.form, source_fps=src_fps,
-            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None))
+            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None),
+            color_profile=config.color_profile)
         if err:
             return jsonify({"ok": False, "error": err}), 400
         return jsonify({"ok": True, "url": url_for("serve_preview", project=job.project, name=name),
@@ -2600,6 +2613,7 @@ def _project_values_for_edit(data: dict, project_name: str) -> dict:
     else:
         values["mode"] = "standard"
     values["full_automation"] = bool(data.get("auto_deliver"))
+    values["color_profile"] = data.get("color_profile", "camera")
     values["download_pin"] = data.get("download_pin") or ""
     values["email_subject"] = data.get("email_subject") or ""
     values["email_body"] = data.get("email_body") or ""
@@ -2621,6 +2635,7 @@ def _project_values_for_edit(data: dict, project_name: str) -> dict:
     grade = data.get("grade") or {}
     values["exposure"] = str(grade.get("exposure", 0))
     values["contrast"] = str(grade.get("contrast", 1))
+    values["saturation"] = str(grade.get("saturation", 1))
     values["white_balance"] = str(grade.get("white_balance", 0))
     speed_ramp = data.get("speed_ramp") or {}
     if speed_ramp.get("enabled"):
@@ -2649,6 +2664,7 @@ def _adv_values(config, filename: str) -> dict:
     values = {
         "exposure": eff_grade.exposure if eff_grade else 0,
         "contrast": eff_grade.contrast if eff_grade else 1,
+        "saturation": eff_grade.saturation if eff_grade else 1,
         "white_balance": eff_grade.white_balance if eff_grade else 0,
         "speed_ramp_enabled": "on" if eff_ramp else "",
         "speed_ramp_json": "",
@@ -2663,6 +2679,7 @@ def _adv_values(config, filename: str) -> dict:
     values["adv_project_json"] = json.dumps({
         "exposure": proj_grade.exposure if proj_grade else 0,
         "contrast": proj_grade.contrast if proj_grade else 1,
+        "saturation": proj_grade.saturation if proj_grade else 1,
         "white_balance": proj_grade.white_balance if proj_grade else 0,
         "speed_ramp": json.loads(_ramp_json(proj_ramp)) if proj_ramp else None,
     })
@@ -2765,6 +2782,7 @@ def _build_card(job: Job, inbox_dir: Path) -> dict:
         "is_vertical": is_vertical,
         "adv_exposure": eff_grade.exposure if eff_grade else 0,
         "adv_contrast": eff_grade.contrast if eff_grade else 1,
+        "adv_saturation": eff_grade.saturation if eff_grade else 1,
         "adv_white_balance": eff_grade.white_balance if eff_grade else 0,
         "adv_values": _adv_values(config, job.filename),
         "project_has_ramp": project_has_ramp,
@@ -2926,15 +2944,19 @@ def _parse_advanced_fields(form) -> tuple[dict | None, str | None]:
     try:
         exposure = float(form.get("exposure", "0") or 0)
         contrast = float(form.get("contrast", "1") or 1)
+        saturation = float(form.get("saturation", "1") or 1)
         white_balance = int(float(form.get("white_balance", "0") or 0))
     except ValueError:
-        return None, "Exposure, contrast and white balance must be numbers."
-    if not (-2.0 <= exposure <= 2.0 and 0.5 <= contrast <= 2.0 and -100 <= white_balance <= 100):
-        return None, "Exposure (-2..2), contrast (0.5..2) or white balance (-100..100) is out of range."
+        return None, "Exposure, contrast, saturation and white balance must be numbers."
+    if not (-5.0 <= exposure <= 5.0 and 0.5 <= contrast <= 2.0
+            and 0.0 <= saturation <= 2.0 and -100 <= white_balance <= 100):
+        return None, ("Exposure (-5..5), contrast (0.5..2), saturation (0..2) or "
+                      "white balance (-100..100) is out of range.")
     grade = None
-    if abs(exposure) > 1e-3 or abs(contrast - 1.0) > 1e-3 or white_balance != 0:
+    if (abs(exposure) > 1e-3 or abs(contrast - 1.0) > 1e-3
+            or abs(saturation - 1.0) > 1e-3 or white_balance != 0):
         grade = {"exposure": round(exposure, 3), "contrast": round(contrast, 3),
-                 "white_balance": white_balance}
+                 "saturation": round(saturation, 3), "white_balance": white_balance}
 
     speed_ramp = None
     if form.get("speed_ramp_enabled") == "on":
@@ -3121,6 +3143,9 @@ def _parse_project_form(req):
         mode = "standard"
     lan_delivery = mode == "lan"
     offline_mode = mode == "offline"
+    color_profile = (form.get("color_profile") or "camera").strip().lower()
+    if color_profile not in VALID_COLOR_PROFILES:
+        return None, "Invalid colour profile."
     # The guest download PIN is optional for the Wi-Fi / offline modes: blank
     # means guests download with no PIN prompt. Only the format is enforced.
     download_pin = form.get("download_pin", "").strip() or None
@@ -3224,6 +3249,7 @@ def _parse_project_form(req):
         "lan_delivery": lan_delivery,
         "offline_mode": offline_mode,
         "download_pin": download_pin,
+        "color_profile": color_profile,
         "soundtrack_volume_db": soundtrack_volume_db if soundtrack_volume_db is not None else 0.0,
         "original_volume_db": original_volume_db if original_volume_db is not None else 0.0,
         "soundtrack_trim": {

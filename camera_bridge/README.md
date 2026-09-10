@@ -62,10 +62,12 @@ led to the wrong conclusion that no gap existed.
   processing and the Ethernet graph reads a fraction of line rate.
 
 The non-raw formats are also wrong for the render pipeline:
-`effects.build_cine_source_filter` applies the camera's white-balance gains and
-a 2.2 gamma on the assumption the data is near-linear raw, so processed footage
-gets that grade double-applied - or, if the `wbgain` tags are missing, silently
-loses both the colour fix and the BT.709 output tagging.
+`effects.build_cine_source_filter` reproduces the camera's own processing - black
+reference, colour matrix, tone curve - on the assumption the data is unprocessed
+raw, so processed footage gets all of that double-applied. Without a `.look.json`
+sidecar it falls back to the legacy `wbgain` + 2.2 gamma approximation, and if the
+`wbgain` tags are missing too it silently loses both the colour fix and the BT.709
+output tagging.
 
 So: **when comparing against PCC, match the format on both sides**, and pass
 `spike.py --file-type` to measure whatever the app is actually configured for.

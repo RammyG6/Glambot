@@ -214,6 +214,26 @@
             </div>
           </div>
 
+          <div class="row">
+            <div>
+              <label for="color_profile">Colour profile (raw footage)</label>
+              <select id="color_profile" name="color_profile">
+                {% for val, label in [
+                     ('camera', 'Camera &mdash; what the camera recorded (default)'),
+                     ('log1',   'Log1 &mdash; Vision Research Log1'),
+                     ('log2',   'Log2 &mdash; Vision Research Log2'),
+                     ('rec709', 'Rec709 &mdash; fixed 2.2 gamma (approximate)')] %}
+                  <option value="{{ val }}" {% if values.get('color_profile', 'camera') == val %}selected{% endif %}>{{ label|safe }}</option>
+                {% endfor %}
+              </select>
+              <p class="hint">The look applied to raw Phantom <code>.cine</code> footage before the
+                Colour &amp; exposure grade below. <strong>Camera</strong>, <strong>Log1</strong> and
+                <strong>Log2</strong> are reproduced from the Phantom SDK's own renderer &mdash; measured
+                within 0.6% of it &mdash; so they match what PCC shows, not an approximation.
+                <strong>Rec709</strong> is Glambot's own fixed curve and does not. Other footage is
+                unaffected.</p>
+            </div>
+          </div>
 
           <div class="row">
             <div>

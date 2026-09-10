@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import threading
 import time
 import urllib.error
@@ -50,6 +51,109 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "handoff_notify_url": "",      # Chataigne/show-control endpoint: POST {"action":"release"|"resume"}
     "poll_seconds": 5,
 }
+
+# Code values a full-scale header would report, by bit depth. When a .cine says
+# black 0 / white one of these it is describing the sensor's nominal range and
+# telling us nothing about the decode, so we measure instead.
+_FULL_SCALE = {255, 1023, 4095, 16383, 65535}
+
+
+def _sidecar_is_current(sidecar: Path) -> bool:
+    """Whether an existing sidecar already carries everything the renderer wants.
+
+    A sidecar written before the black reference existed is missing the one
+    field that stops the render coming out flat, so the backfill has to rewrite
+    it rather than skip it. An unreadable sidecar counts as out of date - worst
+    case it gets rewritten.
+    """
+    if not sidecar.exists():
+        return False
+    try:
+        look = json.loads(sidecar.read_text(encoding="utf-8")).get("look")
+    except (OSError, ValueError):
+        return False
+    return isinstance(look, dict) and "levels_source" in look
+
+
+def _levels_from_header(look: dict) -> tuple[float, float] | None:
+    """Black/white levels from the .cine header, as 0..1 fractions.
+
+    Returns None when the header is full-scale, which is the usual case: on a
+    VEO 4K it reports 0 / 4095 and normalising to that is an identity op.
+    """
+    try:
+        black = int(look.get("black_level"))
+        white = int(look.get("white_level"))
+    except (TypeError, ValueError):
+        return None
+    if white <= black or white <= 0:
+        return None
+    if black <= 0 and white in _FULL_SCALE:
+        return None
+    # The header's levels are in its own bit depth - infer the scale from the
+    # white level rather than trusting real_bpp, which reports 10 on files whose
+    # levels are quoted in 12 bits.
+    full = next((f for f in sorted(_FULL_SCALE) if white <= f), None)
+    if not full:
+        return None
+    return black / full, white / full
+
+
+def _measure_levels(clip: Path) -> tuple[float, float] | None:
+    """The darkest and brightest luma actually present, as 0..1 fractions.
+
+    One decoded frame through ffmpeg's `signalstats`. This is what catches the
+    fixed pedestal the header hides: measured at 7283-7316 of 65535 across six
+    clips from two different days.
+    """
+    from .processor import _NO_WINDOW_FLAGS, _resolve_ffmpeg
+    ffmpeg = _resolve_ffmpeg()
+    if not ffmpeg:
+        logger.warning("no ffmpeg available - %s gets no black reference", clip.name)
+        return None
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-v", "error", "-i", str(clip), "-frames:v", "1",
+             "-vf", "format=gbrp16le,signalstats,metadata=print:file=-",
+             "-f", "null", "-"],
+            capture_output=True, text=True, timeout=120,
+            creationflags=_NO_WINDOW_FLAGS)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("could not measure the black reference of %s: %s", clip.name, exc)
+        return None
+    stats: dict[str, float] = {}
+    for line in proc.stdout.splitlines():
+        key, _, val = line.strip().partition("=")
+        key = key.rsplit(".", 1)[-1]
+        if key in ("YMIN", "YMAX"):
+            try:
+                stats[key] = float(val)
+            except ValueError:
+                pass
+    if "YMIN" not in stats or "YMAX" not in stats:
+        logger.warning("signalstats gave no levels for %s", clip.name)
+        return None
+    lo, hi = stats["YMIN"] / 65535.0, stats["YMAX"] / 65535.0
+    # Don't stretch highlights that are already near clipping - a shoulder pulled
+    # up is its own kind of wrong. Only the floor is reliably a fixed offset.
+    if hi > 0.95:
+        hi = 1.0
+    if hi - lo < 0.1:
+        return None
+    return round(lo, 6), round(hi, 6)
+
+
+def _clip_levels(clip: Path, look: dict) -> tuple[float | None, float | None, str]:
+    """Black/white points for a clip: the header when it says something real,
+    otherwise measured from the footage."""
+    from_header = _levels_from_header(look)
+    if from_header:
+        return from_header[0], from_header[1], "header"
+    measured = _measure_levels(clip)
+    if measured:
+        return measured[0], measured[1], "measured"
+    return None, None, "none"
+
 
 _CINE_SUFFIX = ".cine"
 _PART_SUFFIX = ".part"
@@ -742,16 +846,28 @@ class PhantomImportServer:
 
         Most of it - the tone curve above all - never reaches ffprobe, so
         without this the renderer has no way to reproduce the camera's look and
-        falls back to a flat approximation.
+        falls back to the legacy wbgain+gamma approximation.
+
+        The black reference is added here too. It is the one number the header
+        does not usefully carry (it reports the sensor's nominal 0..4095, not
+        what the decode produces) and the one the renderer cannot afford to
+        guess, so it is measured from the footage once, here, rather than on
+        every render.
         """
         try:
             res = self._bridge.request("read_look", {"path": str(clip)}, timeout=60)
         except BridgeError as exc:
             logger.warning("could not read the colour profile of %s: %s", clip.name, exc)
             return False
+        look = res.get("look")
+        if isinstance(look, dict):
+            lo, hi, source = _clip_levels(clip, look)
+            if lo is not None:
+                look["black_floor"], look["white_ceiling"] = lo, hi
+                look["levels_source"] = source
         try:
             Path(str(clip.with_suffix("")) + _LOOK_SUFFIX).write_text(
-                json.dumps({"clip": clip.name, "look": res.get("look")}, indent=2),
+                json.dumps({"clip": clip.name, "look": look}, indent=2),
                 encoding="utf-8")
             return True
         except OSError as exc:
@@ -775,7 +891,7 @@ class PhantomImportServer:
         done, skipped, failed = 0, 0, 0
         try:
             for clip in sorted(base.rglob(f"*{_CINE_SUFFIX}")):
-                if Path(str(clip.with_suffix("")) + _LOOK_SUFFIX).exists():
+                if _sidecar_is_current(Path(str(clip.with_suffix("")) + _LOOK_SUFFIX)):
                     skipped += 1
                     continue
                 if self._write_look_sidecar(clip):

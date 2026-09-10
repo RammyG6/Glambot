@@ -126,7 +126,7 @@
         '<strong>' + esc(p.project) + '</strong>' +
         '<div class="r-proj-body">' +
         '<div class="r-proj-controls">' +
-        '<select data-live>' + '<option value="">Auto (newest)</option>' + opts + '</select>' +
+        '<select data-live>' + '<option value="">Auto — loop all clips</option>' + opts + '</select>' +
         '<div class="row">' +
         '<button type="button" class="btn btn-secondary" data-pause>' + (p.paused ? 'Resume playback' : 'Pause playback') + '</button>' +
         '</div>' +
@@ -171,12 +171,13 @@
 
   // Reflect the picked clip on the select into the clip-tools thumbnail and
   // the gallery's highlighted tile - shared by the change handler below and
-  // by the initial render (so "Auto (newest)" / the pinned live clip starts
-  // in sync too).
+  // by the initial render (so Auto / the pinned live clip starts in sync too).
   function syncClipTools(proj) {
     var sel = proj.querySelector('[data-live]');
-    // "Auto (newest)" has no thumb data of its own - fall back to the
-    // actual newest-clip option (options[1]) for both the id and the thumb.
+    // Auto has no thumb data of its own - fall back to the actual
+    // newest-clip option (options[1]) for both the id and the thumb. Auto
+    // cycles the whole reel on the display, but the newest clip is what the
+    // operator's Email / Hide buttons here should act on.
     var opt = sel.value ? sel.selectedOptions[0] : sel.options[1];
     var id = opt ? opt.value : '';
     var hasThumb = opt && opt.dataset.thumb === '1';

@@ -72,12 +72,14 @@ def _bezier1(p0: float, p1: float, p2: float, p3: float, u: float) -> float:
 
 @dataclass
 class Grade:
-    exposure: float = 0.0      # stops, -2..2
+    exposure: float = 0.0      # stops, -5..5
     contrast: float = 1.0      # 0.5..2
+    saturation: float = 1.0    # 0..2, 1 = untouched
     white_balance: int = 0     # -100 (warm) .. 100 (cool)
 
     def is_neutral(self) -> bool:
-        return abs(self.exposure) < 1e-3 and abs(self.contrast - 1.0) < 1e-3 and self.white_balance == 0
+        return (abs(self.exposure) < 1e-3 and abs(self.contrast - 1.0) < 1e-3
+                and abs(self.saturation - 1.0) < 1e-3 and self.white_balance == 0)
 
 
 @dataclass
@@ -268,12 +270,21 @@ def build_grade_filter(grade: Grade | None, ffmpeg_bin: str) -> str:
         return ""
     parts: list[str] = []
 
-    exposure = max(-2.0, min(2.0, grade.exposure))
+    exposure = max(-5.0, min(5.0, grade.exposure))
     contrast = max(0.5, min(2.0, grade.contrast))
-    if abs(exposure) > 1e-3 or abs(contrast - 1.0) > 1e-3:
+    saturation = max(0.0, min(2.0, grade.saturation))
+    if (abs(exposure) > 1e-3 or abs(contrast - 1.0) > 1e-3
+            or abs(saturation - 1.0) > 1e-3):
         gamma = 2 ** (-exposure / 2)
-        brightness = max(-0.3, min(0.3, exposure * 0.10))
-        parts.append(f"eq=gamma={gamma:.4f}:brightness={brightness:.4f}:contrast={contrast:.3f}")
+        # The cap has to track the slider's range, not sit at a fixed 0.3.
+        # `eq` combines brightness and gamma such that a *frozen* brightness
+        # against a still-falling gamma sends the picture back the other way:
+        # measured on a real frame, +3/+4/+5 stops came out at mean luma
+        # 78 / 63 / 52, i.e. the slider reversed past 3 stops. Keeping the
+        # brightness proportional across the whole range gives 78 / 84 / 92.
+        brightness = max(-0.5, min(0.5, exposure * 0.10))
+        parts.append(f"eq=gamma={gamma:.4f}:brightness={brightness:.4f}"
+                     f":contrast={contrast:.3f}:saturation={saturation:.3f}")
 
     wb = max(-100, min(100, int(grade.white_balance)))
     if wb != 0:
@@ -287,15 +298,55 @@ def build_grade_filter(grade: Grade | None, ffmpeg_bin: str) -> str:
     return ",".join(parts)
 
 
-# Base looks for raw Phantom footage, applied after the camera's white-balance
-# gains. `rec709` is the original fixed behaviour and must stay byte-identical.
-# The log variants are progressively flatter for grading downstream.
+# Base looks for raw Phantom footage, chosen per project. `camera` reproduces
+# what the camera recorded (its own tone curve, from the sidecar) and is the
+# default; the others replace that tone stage with a fixed curve.
 #
-# These are Glambot's own curves, tuned by eye - NOT Vision Research's Log1/Log2.
-# This camera reports no log mode (gsSupportsLogMode = 0), so nothing in the
-# .cine tells us what Phantom's curves would look like; don't present these as
-# matching PCC.
+# FALLBACK ONLY. These are Glambot's own curves, tuned by eye - they are NOT
+# Vision Research's Log1/Log2 and must never be described to a client as
+# matching PCC. They are used only when a profile has no fitted LUT in looks/,
+# and measured ~10% mean error against what the SDK actually renders.
+#
+# The real Log1/Log2 come from looks/*.cube instead (see look_lut_path and
+# camera_bridge/fit_look.py), fitted from the SDK's own renderer to ~0.5%.
+# `GCI_LOGMODE` is a *cine header* field, so the SDK renders log from an
+# ordinary raw clip even though this body cannot record it - the camera-side
+# gsSupportsLogMode reads 0 while the file cine's GCI_SUPPORTSLOGMODE reads 1.
+#
+# NB on direction: ffmpeg's `eq` applies output = input^(1/gamma), so a *higher*
+# gamma lifts shadows. A flat/log look wants lifted blacks and reduced contrast,
+# hence gamma above 2.2 on the log variants, not below - the reverse crushes the
+# shadows it is supposed to protect.
+CAMERA_PROFILE = "camera"
+_CINE_PROFILES = {
+    "rec709": "eq=gamma=2.2",
+    "log1": "eq=gamma=2.6:contrast=0.85:brightness=0.03",
+    "log2": "eq=gamma=3.0:contrast=0.70:brightness=0.06",
+}
+
+# The camera's colour description, written beside each clip at import time.
 LOOK_SUFFIX = ".look.json"
+
+
+def _normalise_profile(profile: str | None) -> str:
+    """A profile name we recognise. Anything else becomes `camera`.
+
+    load_config already validates this, so an unknown name here means a config
+    edited by hand or a newer name on older code. Falling back to the camera's
+    own look keeps a shoot running, and doing it in one place means the LUT
+    path and the reconstructed path cannot disagree about what to fall back to.
+    """
+    name = str(profile or CAMERA_PROFILE).lower()
+    if name == CAMERA_PROFILE or name in _CINE_PROFILES:
+        return name
+    logger.warning("unknown colour profile %r - using the camera's own look", profile)
+    return CAMERA_PROFILE
+
+
+def _profile_tone(profile: str | None) -> str:
+    """The fixed tone stage for a non-camera profile, or "" for `camera`."""
+    name = _normalise_profile(profile)
+    return "" if name == CAMERA_PROFILE else _CINE_PROFILES[name]
 
 
 def load_cine_look(input_path) -> dict | None:
@@ -313,6 +364,101 @@ def load_cine_look(input_path) -> dict | None:
     except (OSError, ValueError):
         logger.warning("could not read the colour sidecar for %s", input_path)
         return None
+
+
+def _levels_filter(look: dict | None) -> str:
+    """Subtract the black reference so the picture actually reaches black.
+
+    ffmpeg's cine decode hands back the sensor's codes untouched, pedestal and
+    all: measured across six clips shot on two different days, the darkest pixel
+    in a full 4096x2160 frame sits at 7283-7316 of 65535 - an 11.2% floor with a
+    0.05% spread, i.e. a fixed offset, not scene content. PCC subtracts this
+    before it does anything else; without it the tone curve's first segment
+    (slope 4.17) multiplies the floor up to 28% grey and the picture reads flat.
+
+    The floor comes from the sidecar, measured from the footage at import time
+    (or from the .cine header when it reports a real sub-range) - never guessed
+    here. No sidecar value means no filter and today's behaviour.
+
+    Only the black point is touched. The sidecar also records `white_ceiling`,
+    but that is just the brightest pixel this clip happens to contain: stretching
+    to it adds contrast that varies shot to shot, so two takes of the same setup
+    land differently. The floor is the opposite - a fixed offset with a 0.05%
+    spread across six clips - so it is the half worth acting on.
+    """
+    lo = _as_float((look or {}).get("black_floor"), -1.0)
+    if not 0.0 < lo < 0.9:
+        return ""
+    # colorlevels defaults the maxima to 1.0, so the highlights stay put.
+    return f"colorlevels=rimin={lo:.6f}:gimin={lo:.6f}:bimin={lo:.6f}"
+
+
+def _matrix_filter(look: dict | None) -> str:
+    """The camera's colour correction matrix as an ffmpeg `colorchannelmixer`.
+
+    `calib_matrix` is the factory characterisation of this sensor and
+    `user_matrix` whatever the operator set on top; the camera applies both when
+    `enable_matrices` is set. Skipping them is why rendered clips came out
+    desaturated *and* green. Applied in linear light, before the tone curve,
+    which is the order the camera uses.
+    """
+    look = look or {}
+    if not look.get("enable_matrices"):
+        return ""
+    calib = _matrix3(look.get("calib_matrix"))
+    user = _matrix3(look.get("user_matrix"))
+    if calib is None and user is None:
+        return ""
+    m = _mat_mul(user, calib) if (calib and user) else (calib or user)
+    # Identity contributes nothing but a filter stage and a rounding pass.
+    ident = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    if all(abs(a - b) < 1e-4 for a, b in zip(m, ident)):
+        return ""
+
+    # Applied whole, white balance included. The matrix's rows do not sum to 1 -
+    # on a tungsten-lit clip they sum to 1.26 / 1.15 / 1.76 - because Phantom
+    # bakes the white balance into it. That lift is not an artefact to normalise
+    # away: without it the render keeps the green cast of an unbalanced Bayer
+    # decode, which is visible on any frame. (The separate `wb_red`/`wb_blue`
+    # gains stay unapplied - see build_cine_source_filter - as the matrix has
+    # already done that job.)
+    #
+    # ffmpeg caps colorchannelmixer coefficients at +-2 and the blue row exceeds
+    # it, so the matrix is split into m/s followed by a uniform gain of s. The
+    # two are exactly equivalent: m/s can only ever produce 1/s of the final
+    # value, so the intermediate stage clips nothing the single stage wouldn't.
+    scale = max(1.0, max(abs(v) for v in m) / 2.0)
+    if scale > 2.0:
+        # Would need a third stage, and by then the intermediate really would
+        # clip. Not a matrix we understand; skip it rather than render wrong.
+        logger.warning("colour matrix coefficients out of range - skipping it")
+        return ""
+    keys = ("rr", "rg", "rb", "gr", "gg", "gb", "br", "bg", "bb")
+    stages = ["colorchannelmixer=" + ":".join(
+        f"{k}={v / scale:.6f}" for k, v in zip(keys, m))]
+    if scale > 1.0 + 1e-9:
+        stages.append(f"colorchannelmixer=rr={scale:.6f}:gg={scale:.6f}:bb={scale:.6f}")
+    return ",".join(stages)
+
+
+def _matrix3(values) -> list[float] | None:
+    """Nine finite floats, row-major, or None. A short or malformed matrix is
+    dropped rather than padded - a wrong matrix is worse than none."""
+    if not isinstance(values, (list, tuple)) or len(values) < 9:
+        return None
+    try:
+        m = [float(v) for v in values[:9]]
+    except (TypeError, ValueError):
+        return None
+    if any(v != v or abs(v) > 16.0 for v in m):   # NaN or absurd
+        return None
+    return m
+
+
+def _mat_mul(a: list[float], b: list[float]) -> list[float]:
+    """Row-major 3x3 product a*b, i.e. b applied first."""
+    return [sum(a[r * 3 + k] * b[k * 3 + c] for k in range(3))
+            for r in range(3) for c in range(3)]
 
 
 def _tone_curve_filter(tone: dict | None) -> str:
@@ -345,22 +491,100 @@ def _tone_curve_filter(tone: dict | None) -> str:
     return "curves=all='" + " ".join(f"{x:g}/{y:g}" for x, y in uniq) + "'"
 
 
-def build_cine_source_filter(input_path, ffprobe_bin: str, look: dict | None = None) -> str:
+# LUTs fitted against the Phantom SDK's own renderer by camera_bridge/fit_look.py.
+# One per profile; a profile with no .cube falls back to the hand-built chain.
+#
+# Resolved the same way app.py resolves templates/static/logo: a PyInstaller
+# build extracts to a temp dir rather than preserving the package layout, so
+# __file__ points somewhere useless there and the executable's own folder is
+# what tracks the install. Getting this wrong would not raise - the LUT would
+# just never be found and every render would quietly drop to the fallback
+# chain, which is ~10% off the SDK.
+LOOKS_DIR = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
+             else Path(__file__).resolve().parent.parent) / "looks"
+
+
+def look_lut_path(profile: str | None) -> Path | None:
+    """The fitted `.cube` for a profile, or None when there isn't one.
+
+    These beat the hand-built chain by a wide margin - measured against the SDK
+    on real footage, the reconstruction runs ~10% mean error while the LUT runs
+    ~0.5% - because the LUT is fitted from what Phantom's own code produces
+    rather than assembled from the header and hope.
+    """
+    # _normalise_profile only ever returns a name we ship, so a config value
+    # cannot steer this at the filesystem.
+    path = LOOKS_DIR / f"{_normalise_profile(profile)}.cube"
+    return path if path.is_file() else None
+
+
+def _escape_filter_path(path) -> str:
+    r"""A Windows path an ffmpeg filter argument will accept, quotes included.
+
+    Inside a filtergraph `:` separates options, so a drive letter splits the
+    argument and ffmpeg reports "No option name near ...". Escaping the colon
+    is not enough on its own and neither is quoting on its own - of the forms
+    tested against this ffmpeg, only quoted *and* escaped parses:
+
+        file='D\:/Glambot/looks/log1.cube'      works
+        file=D\:/Glambot/looks/log1.cube        fails
+        file=D\\:/Glambot/looks/log1.cube       fails
+        file='D:/Glambot/looks/log1.cube'       fails
+
+    Backslashes become forward slashes, which Windows accepts throughout.
+    """
+    p = str(path).replace("\\", "/")
+    if "'" in p:
+        # Nothing sane escapes a quote inside a quoted filter argument; a look
+        # rendered from the wrong path would be worse than no look at all.
+        raise ValueError(f"LUT path contains a quote, which ffmpeg cannot take: {p}")
+    return "'" + p.replace(":", r"\:") + "'"
+
+
+def _lut_filter(profile: str | None) -> str:
+    path = look_lut_path(profile)
+    if path is None:
+        return ""
+    # Linear interpolation, not the default: these LUTs are fitted samples of a
+    # smooth response, and a spline through them can overshoot into banding.
+    return f"lut1d=file={_escape_filter_path(path)}:interp=linear"
+
+
+def build_cine_source_filter(input_path, ffprobe_bin: str, look: dict | None = None,
+                             profile: str = CAMERA_PROFILE) -> str:
     """Reproduce the camera's own colour for a raw Phantom `.cine`.
 
     ffmpeg debayers the Bayer data but knows nothing about the camera's
     processing description, most of which isn't even exposed to ffprobe. When a
-    `.look.json` sidecar is present we apply what the camera actually recorded:
-    its tone curve, and any non-neutral gain/offset/saturation.
+    `.look.json` sidecar is present we apply what the camera actually recorded,
+    in the camera's own order: black reference, colour matrix, tone curve, then
+    any non-neutral gain/offset/saturation.
+
+    `profile` selects the look. When a fitted LUT exists for it (looks/*.cube,
+    produced by camera_bridge/fit_look.py) the chain is just the cine's colour
+    matrix and that LUT - the LUT already contains everything else Phantom does,
+    measured from the SDK's own output rather than rebuilt from the header.
+
+    Without a LUT it falls back to the reconstruction below: black reference,
+    colour matrix, tone curve, then non-neutral gain/offset/saturation, with
+    rec709/log1/log2 swapping the tone stage for a fixed curve of Glambot's own
+    (see _CINE_PROFILES). That path is known to sit ~10% mean error from what
+    the SDK produces, so it is a fallback and not the intent. The operator's
+    grade composes after either.
 
     Two things this deliberately does NOT do, both established by measurement:
 
-    * It does not apply the white-balance gains. ffmpeg's decode already comes
-      out near-neutral (B/G 0.93 on a tungsten-lit test clip, against 0.21 for
-      the sensor's raw balance), so applying them again is a *second* white
-      balance - that was pushing B/G to 1.37 and giving everything a purple cast.
-    * It does not apply a fixed gamma on top of the tone curve. The curve
-      replaces it; doing both blows the picture out.
+    * It does not apply the `wb_red`/`wb_blue` gains on top of the matrix. The
+      decode is emphatically not neutral - it comes out green, as an unbalanced
+      Bayer decode does - but the white balance for it is already carried in the
+      colour matrix, whose rows sum to 1.26 / 1.15 / 1.76 rather than to 1.
+      Applying the gains as well is a second white balance, which measured as a
+      purple cast (B/G 1.37).
+    * It does not apply the header's `gamma` on top of the tone curve. The
+      curve already is a linear->display transform built around 2.2 - its
+      `0.134 -> 0.400` point is exactly 0.134**(1/2.2) - so a second gamma
+      double-encodes: measured, that takes the black floor to 0.808 and the
+      highlights to 0.906, i.e. no picture left.
 
     Without a sidecar it falls back to the previous wbgain+gamma behaviour, so
     un-backfilled clips and non-Phantom footage are unchanged.
@@ -369,12 +593,43 @@ def build_cine_source_filter(input_path, ffprobe_bin: str, look: dict | None = N
     "" when the file carries no Phantom colour information at all. The
     operator's exposure / contrast / white-balance grade composes after this."""
     look = look if look is not None else load_cine_look(input_path)
-    curve = _tone_curve_filter((look or {}).get("tone"))
+
+    # Preferred path: the cine's own colour matrix, then a LUT fitted against
+    # the SDK's renderer. The LUT absorbs everything else the camera does -
+    # black reference, gamma, tone curve, gain/offset/saturation - so none of
+    # it is reconstructed here, which is exactly why it lands within ~0.5% of
+    # the SDK instead of ~10%.
+    lut = _lut_filter(profile)
+    matrix = _matrix_filter(look)
+    if lut and matrix:
+        return ",".join(["format=gbrp16le", matrix, lut])
+    if lut:
+        logger.info("%s has no colour matrix in its sidecar - falling back to the "
+                    "reconstructed chain; run the Phantom colour backfill",
+                    getattr(input_path, "name", input_path))
+
+    fixed_tone = _profile_tone(profile)
+    curve = fixed_tone or _tone_curve_filter((look or {}).get("tone"))
+    # A fixed profile still needs the sidecar for the black reference and the
+    # matrix, so it only takes this branch when there is a sidecar to read.
+    if fixed_tone and not (look or {}).get("tone"):
+        curve = ""
     if curve:
-        parts = ["format=gbrp16le", curve]
+        # Order matters and mirrors the camera: subtract black, correct colour
+        # in linear light, then encode with the tone curve. Each stage drops out
+        # of the chain entirely when the sidecar has nothing to say about it.
+        parts = ["format=gbrp16le"]
+        for stage in (_levels_filter(look), _matrix_filter(look)):
+            if stage:
+                parts.append(stage)
+        parts.append(curve)
         # Only what the camera actually set - these are all neutral on a stock
-        # setup, so they usually contribute nothing.
+        # setup, so they usually contribute nothing. Skipped under a fixed
+        # profile: those numbers belong to the camera's own look, and stacking
+        # them onto a curve of ours would be applying half of each.
         eq = []
+        if fixed_tone:
+            look = {}
         gain = _as_float((look or {}).get("gain"), 1.0)
         offset = _as_float((look or {}).get("offset"), 0.0)
         sat = _as_float((look or {}).get("saturation"), 1.0)
@@ -421,9 +676,12 @@ def build_cine_source_filter(input_path, ffprobe_bin: str, look: dict | None = N
                 getattr(input_path, "name", input_path))
     r_gain = min(4.0, max(0.2, r_gain))
     b_gain = min(4.0, max(0.2, b_gain))
+    # `camera` has no meaning without a sidecar, so it falls back to rec709 -
+    # which is byte-identical to the behaviour before profiles existed.
+    tone = fixed_tone or _CINE_PROFILES["rec709"]
     return (
         f"format=gbrp16le,colorchannelmixer=rr={r_gain:.4f}:gg=1:bb={b_gain:.4f},"
-        f"eq=gamma=2.2"
+        f"{tone}"
     )
 
 

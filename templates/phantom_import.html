@@ -101,6 +101,10 @@
             <button type="submit" class="btn btn-primary btn-sm">Start</button>
           </form>
         {% endif %}
+        <form method="post" action="{{ url_for('phantom_import_backfill_looks') }}"
+              title="Read the camera's colour description for clips already downloaded, so they render with its own black reference, matrix and tone curve instead of the legacy approximation.">
+          <button type="submit" class="btn btn-ghost btn-sm">Backfill colour</button>
+        </form>
         <span class="cam-badge ready" id="camRecBadge">{{ (status.record_state or 'unknown')|upper }}</span>
         {% set auto_dl = status.auto_download if status.auto_download is defined else settings.auto_download %}
         <span class="chip-row" id="camDlToggle" role="group" aria-label="Download mode">

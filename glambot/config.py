@@ -54,6 +54,11 @@ VALID_OVERLAY_POSITIONS = {
 }
 
 VALID_DELIVERY_MODES = {"email", "qr_only"}
+
+# Base look for raw Phantom .cine footage. "camera", "log1" and "log2" are
+# reproduced from the SDK's own renderer via fitted LUTs (looks/*.cube, see
+# camera_bridge/fit_look.py); "rec709" has no LUT and stays an approximation.
+VALID_COLOR_PROFILES = ("camera", "rec709", "log1", "log2")
 VALID_ROTATIONS = {0, 90, -90, 180}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 MIN_DB, MAX_DB = -60.0, 12.0
@@ -155,6 +160,8 @@ class ProjectConfig:
     offline_mode: bool = False
     grade: Grade | None = None
     speed_ramp: SpeedRamp | None = None
+    # Base look for raw .cine footage; the operator's `grade` layers on top.
+    color_profile: str = "camera"
     email_subject: str | None = None
     email_body: str | None = None
     # Referenced asset files that were missing on disk (see load_config). Each
@@ -243,8 +250,8 @@ def _parse_trim(trim_data: Any, label: str, project_dir: Path) -> Trim | None:
 
 
 def _parse_grade(data: Any, label: str, project_dir: Path) -> Grade | None:
-    """Parse an optional {"exposure","contrast","white_balance"} block.
-    Returns None when absent or fully neutral."""
+    """Parse an optional {"exposure","contrast","saturation","white_balance"}
+    block. Returns None when absent or fully neutral."""
     if data in (None, {}):
         return None
     if not isinstance(data, dict):
@@ -259,8 +266,9 @@ def _parse_grade(data: Any, label: str, project_dir: Path) -> Grade | None:
         return v
 
     grade = Grade(
-        exposure=float(_num("exposure", -2.0, 2.0, 0.0)),
+        exposure=float(_num("exposure", -5.0, 5.0, 0.0)),
         contrast=float(_num("contrast", 0.5, 2.0, 1.0)),
+        saturation=float(_num("saturation", 0.0, 2.0, 1.0)),
         white_balance=int(_num("white_balance", -100, 100, 0)),
     )
     return None if grade.is_neutral() else grade
@@ -642,6 +650,13 @@ def load_config(project_dir: Path) -> ProjectConfig:
     # (see glambot/guest.py).
 
     # --- Advanced editing: colour grade + speed ramp ------------------
+    # An unknown profile falls back rather than refusing to load the project -
+    # a look preference is never worth blocking a shoot over.
+    color_profile = str(data.get("color_profile", "camera") or "camera").lower()
+    if color_profile not in VALID_COLOR_PROFILES:
+        logger.warning("%s/config.json: unknown color_profile %r - using the camera's own look",
+                       project_dir.name, color_profile)
+        color_profile = "camera"
     grade = _parse_grade(data.get("grade"), "grade", project_dir)
     speed_ramp = _parse_speed_ramp(data.get("speed_ramp"), "speed_ramp", project_dir)
 
@@ -705,6 +720,7 @@ def load_config(project_dir: Path) -> ProjectConfig:
         offline_mode=offline_mode,
         grade=grade,
         speed_ramp=speed_ramp,
+        color_profile=color_profile,
         email_subject=email_subject,
         email_body=email_body,
         missing_assets=missing_assets,

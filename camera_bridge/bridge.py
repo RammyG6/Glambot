@@ -279,6 +279,21 @@ def _supports_color_profile(cam: Any) -> bool:
     return bool(val)
 
 
+def _get_gamma(cam: Any) -> float | None:
+    """The camera's fGamma. Like the colour profile this is a *cine* selector,
+    not a camera one, so it goes through the live cine."""
+    raw = _with_live_cine(cam, lambda c: c.get_selector_float(GCI_GAMMA))
+    return None if raw is None else round(float(raw), 4)
+
+
+def _set_gamma(cam: Any, value: Any) -> None:
+    # Whatever is set here lands in the header of every take that follows, and
+    # reaches the renderer through the clip's .look.json - the render path has
+    # no gamma control of its own, by design.
+    _with_live_cine(cam, lambda c: c.set_selector_float(
+        utils.SetSelector(GCI_GAMMA, float(value))))
+
+
 def _get_color_profile(cam: Any) -> str | None:
     raw = _with_live_cine(cam, lambda c: c.get_selector_uint(GCI_LOGMODE))
     if raw is None:
@@ -494,6 +509,7 @@ class Bridge:
         # callables taking (cam) / (cam, value) for anything the wrapper has no
         # property for - the colour profile is a cine selector, not a camera one.
         "color_profile": (_get_color_profile, _set_color_profile, "profile"),
+        "gamma": (_get_gamma, _set_gamma, "float"),
         "partition_count": ("partition_count", "partition_count", "int"),
         "exp_index": ("exp_index", "exp_index", "int"),
         "frame_rate": ("frame_rate", "frame_rate", "int"),

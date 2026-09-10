@@ -45,6 +45,9 @@ datas += [
     (str(REPO_ROOT / "templates"), "templates"),
     (str(REPO_ROOT / "static"), "static"),
     (str(REPO_ROOT / "logo"), "logo"),
+    # Fitted Phantom colour LUTs. Without these every .cine render silently
+    # falls back to the reconstructed chain, which measures ~10% off the SDK.
+    (str(REPO_ROOT / "looks"), "looks"),
     (str(WINDOWS_APP_DIR / "vendor" / "ffprobe.exe"), "vendor"),
 ]
 

@@ -142,15 +142,18 @@ soundtracks/
   the mode above, so it combines with any of them — the form shows it as the
   **"Full automation — deliver without approval"** checkbox. See "Full
   automation" below.
-- `color_profile` (optional, one of `rec709` / `log1` / `log2`, default
-  `rec709`): the base look applied to raw Phantom `.cine` footage before
-  `grade`. `log1`/`log2` are progressively flatter for grading downstream.
-  These are Glambot's own curves, not Vision Research's — this camera reports
-  no log mode, so nothing in the file describes what Phantom's would be. Other
-  footage is unaffected.
-- `grade` (optional, `{ "exposure": 0.0, "contrast": 1.0, "white_balance": 0 }`):
-  exposure in stops (-2..2), contrast (0.5..2), white balance (-100 warm ..
-  100 cool). Applied to every clip. See "Advanced editing".
+- `color_profile` (optional, one of `camera` / `log1` / `log2` / `rec709`,
+  default `camera`): the look applied to raw Phantom `.cine` footage before
+  `grade`. `camera`, `log1` and `log2` are reproduced from the Phantom SDK's own
+  renderer through fitted LUTs in `looks/` — measured within 0.6% of it, so they
+  match what PCC shows. `rec709` is Glambot's own fixed 2.2 gamma and is an
+  approximation. Other footage is unaffected. See "Phantom colour" below.
+- `grade` (optional, `{ "exposure": 0.0, "contrast": 1.0, "saturation": 1.0,
+  "white_balance": 0 }`): exposure in stops (-5..5), contrast (0.5..2),
+  saturation (0..2, 0 is monochrome), white balance (-100 warm .. 100 cool).
+  Applied to every clip, on top of the camera's own colour. Omitted keys take
+  their neutral default, so a config written before `saturation` existed loads
+  unchanged. See "Advanced editing".
 - `speed_ramp` (optional): retime the clip along a curve (fast/slow-motion
   sections). `points` is `[{ "t": 0..1, "speed": 0.1..40, "hl": [dt,dv],
   "hr": [dt,dv] }]` — `hl`/`hr` are optional bezier tangent handle offsets
@@ -199,8 +202,14 @@ Since there's no Approve click for `qr_only` + full automation, open
 **`http://127.0.0.1:5000/projects/<project name>/kiosk`** on the venue
 monitor instead — a self-updating page (every 5s, no full reload so playback
 isn't interrupted) with a grid of every delivered clip's thumbnail + QR code
-on the left and, on the right, a **playback panel** that auto-plays (muted,
-looping) the single newest clip, switching to a newer one as it lands.
+on the left and, on the right, a **playback panel** that auto-plays (muted) the
+delivered clips. Left on **Auto**, it cycles back through the whole reel
+newest-first and wraps, so a quiet spell still shows the session rather than
+repeating one clip; a newly delivered clip interrupts the cycle and goes on
+straight away. The reel is *every* delivered clip, not just the grid's page —
+the grid stays capped (Load more) because each tile carries a generated QR. Pinning a specific clip from the remote page (`/remote`) stops
+the cycle and repeats that clip until you pick another or hit
+**Back to live**.
 
 Clips delivered via QR aren't emailed, but you can email any of them after
 the fact from **"Email a delivered clip"** on the review page (`/clips`):
@@ -278,10 +287,47 @@ background) · **Overlay** (the two orientation overlays, with placement
 previews) · **Soundtrack** · **Advanced editing** · **Email template**. The
 last-used tab is remembered per browser.
 
+### Phantom colour
+
+ffmpeg debayers a `.cine` but knows nothing about Phantom's image pipeline, so
+raw footage renders green and flat unless something applies the camera's colour.
+Rebuilding that pipeline by hand from the header (black level, colour matrix,
+tone curve) was measured at **~10% mean error** against what the SDK actually
+produces — visibly wrong, not a rounding difference.
+
+Instead, `camera_bridge/fit_look.py` asks the SDK to render frames itself
+(`PhGetCineImage` under `UC_VIEW`, the path PCC's viewer uses) and fits a LUT
+from ffmpeg's raw decode to that output. The render chain is then just the
+clip's own colour matrix plus that LUT — **~0.5% mean error**, at full ffmpeg
+speed, with downloads still raw at 542 MB/s.
+
+`GCI_LOGMODE` is a *cine header* field rather than a camera capability, so the
+SDK renders Vision Research's Log1/Log2 from ordinary raw clips even though this
+body cannot record log (camera-side `gsSupportsLogMode` = 0, while the file
+cine's `GCI_SUPPORTSLOGMODE` = 1).
+
+To refit — after a camera calibration change, or to add coverage:
+
+```
+camera_bridge
+untime\Scripts\python.exe camera_bridgeit_look.py ^
+    --out looks\log1.cube --logmode 1 --offsets 0,200 <clips...>
+```
+
+It needs each clip's `.look.json` sidecar for the colour matrix (run **Backfill
+colour** on the Phantom import page first) and prints its residual against the
+SDK. Fit from several clips: a LUT only knows the input range its samples
+covered. Clips are never modified — `PhSetCineInfo` acts on the open handle.
+
+A profile with no `.cube` falls back to the hand-built chain, which is why
+`rec709` still works and why nothing breaks if `looks/` is missing.
+
 ### Advanced editing
 
-- **Colour & exposure** — exposure / contrast / white-balance sliders, applied
-  to every clip the project renders (ffmpeg `eq` + `colortemperature`). Dragging
+- **Colour & exposure** — exposure / contrast / saturation / white-balance
+  sliders, applied to every clip the project renders (ffmpeg `eq` +
+  `colortemperature`). They compose *after* the camera's own colour, so they
+  trim the Phantom look rather than replace it. Dragging
   a slider **live-approximates** the change on the Render-preview video with a
   CSS filter (caption "approximate"); the **Render preview** button bakes the
   exact ffmpeg grade.

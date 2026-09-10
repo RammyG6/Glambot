@@ -16,11 +16,14 @@
      {% if context == 'clip' %}data-adv-project='{{ values.get("adv_project_json", "") }}'{% endif %}>
   <div class="adv-grade">
     <label>Exposure &mdash; <span class="adv-val">{{ values.get('exposure', 0) }}</span> stops
-      <input type="range" name="exposure" min="-2" max="2" step="0.05" data-default="0" value="{{ values.get('exposure', 0) }}"></label>
+      <input type="range" name="exposure" min="-5" max="5" step="0.05" data-default="0" value="{{ values.get('exposure', 0) }}"></label>
     <button type="button" class="adv-reset" data-reset="exposure">Reset</button>
     <label>Contrast &mdash; <span class="adv-val">{{ values.get('contrast', 1) }}</span>&times;
       <input type="range" name="contrast" min="0.5" max="2" step="0.05" data-default="1" value="{{ values.get('contrast', 1) }}"></label>
     <button type="button" class="adv-reset" data-reset="contrast">Reset</button>
+    <label>Saturation &mdash; <span class="adv-val">{{ values.get('saturation', 1) }}</span>&times;
+      <input type="range" name="saturation" min="0" max="2" step="0.05" data-default="1" value="{{ values.get('saturation', 1) }}"></label>
+    <button type="button" class="adv-reset" data-reset="saturation">Reset</button>
     <label>White balance &mdash; <span class="adv-val">{{ values.get('white_balance', 0) }}</span> (&minus; warm / + cool)
       <input type="range" name="white_balance" min="-100" max="100" step="1" data-default="0" value="{{ values.get('white_balance', 0) }}"></label>
     <button type="button" class="adv-reset" data-reset="white_balance">Reset</button>

@@ -1,5 +1,5 @@
 /* Advanced editing controls (shared - templates/_advanced_editor.html):
- *  - live value labels + CSS-approx preview for exposure / contrast / WB
+ *  - live value labels + CSS-approx preview for exposure / contrast / saturation / WB
  *  - a draggable speed-ramp curve editor that serialises into
  *    input[name=speed_ramp_json]
  *  - drives an optional "Render preview" button
@@ -382,10 +382,11 @@
       w.appendChild(tint);
       var baked = false;
       return {
-        apply: function (expo, contrast, wb) {
+        apply: function (expo, contrast, sat, wb) {
           if (baked) return;
           videoEl.style.filter = "brightness(" + Math.pow(2, expo).toFixed(3) +
-            ") contrast(" + (+contrast).toFixed(3) + ")";
+            ") contrast(" + (+contrast).toFixed(3) +
+            ") saturate(" + (+sat).toFixed(3) + ")";
           tint.style.background = wb < 0 ? "rgb(255,170,80)" : "rgb(120,170,255)";
           tint.style.opacity = wb === 0 ? 0 : Math.min(0.4, Math.abs(wb) / 250);
         },
@@ -393,7 +394,7 @@
       };
     }
 
-    // ---- Exposure / contrast / white balance sliders ----
+    // ---- Exposure / contrast / saturation / white balance sliders ----
     var sliders = Array.prototype.slice.call(root.querySelectorAll(".adv-grade input[type=range]"));
     var gradeApprox = preview ? makeGradeApprox(preview.video) : null;
 
@@ -402,13 +403,14 @@
         var el = root.querySelector("input[name=" + name + "]");
         return el ? (parseFloat(el.value) || dflt) : dflt;
       }
-      return [val("exposure", 0), val("contrast", 1), val("white_balance", 0)];
+      return [val("exposure", 0), val("contrast", 1), val("saturation", 1),
+              val("white_balance", 0)];
     }
     function refreshApprox(fromSlider) {
       if (!gradeApprox) return;
       gradeApprox.setBaked(false);
       var g = currentGrade();
-      gradeApprox.apply(g[0], g[1], g[2]);
+      gradeApprox.apply(g[0], g[1], g[2], g[3]);
       if (fromSlider && preview && preview.status && preview.video &&
           !preview.video.classList.contains("hidden")) {
         preview.status.textContent = "Approximate colour — Render preview to confirm.";
@@ -451,6 +453,7 @@
     function applyState(state) {
       setControlValue("exposure", state && state.exposure != null ? state.exposure : 0);
       setControlValue("contrast", state && state.contrast != null ? state.contrast : 1);
+      setControlValue("saturation", state && state.saturation != null ? state.saturation : 1);
       setControlValue("white_balance", state && state.white_balance != null ? state.white_balance : 0);
       refreshApprox(true);
       var ramp = state && state.speed_ramp;

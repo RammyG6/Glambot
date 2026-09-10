@@ -346,11 +346,12 @@ def build_ffmpeg_cmd(input_path: Path, output_path: Path, config: ProjectConfig,
         cmd += ["-to", trim_end]
     cmd += ["-i", str(input_path)]
 
-    # Raw Phantom .cine: neutralise the green/flat Bayer decode before anything
-    # else touches the picture (so the speed ramp + grade see real colour).
+    # Raw Phantom .cine: reproduce the camera's own colour before anything else
+    # touches the picture (so the speed ramp + grade see real colour).
     cine_fix = ""
     if input_path.suffix.lower() == ".cine":
-        cine_fix = build_cine_source_filter(input_path, _FFPROBE)
+        cine_fix = build_cine_source_filter(input_path, _FFPROBE,
+                                            profile=config.color_profile)
 
     # Input indices are assigned dynamically: [0]=video always; the overlay
     # (if any) is [1]; the soundtrack (if any) is whatever comes next.
@@ -725,8 +726,28 @@ def _archive_original(source_path: Path) -> None:
             dest = archive_dir / f"{source_path.stem}_{uuid4().hex[:8]}{source_path.suffix}"
         shutil.move(str(source_path), str(dest))
         logger.info("Archived original %s -> %s", source_path, dest)
+        _archive_look_sidecar(source_path, dest)
     except Exception:
         logger.warning("Could not archive original %s", source_path, exc_info=True)
+
+
+def _archive_look_sidecar(source_path: Path, dest: Path) -> None:
+    """Take the clip's colour sidecar with it.
+
+    `load_cine_look` looks for `<clip>.look.json` *beside the clip*, so leaving
+    the sidecar behind silently downgrades every later render of the archived
+    original to the legacy wbgain+gamma fallback - a re-render would not match
+    the render it was repeating. Renamed to match `dest`, which may have gained
+    a uuid suffix to avoid a collision."""
+    from .effects import LOOK_SUFFIX
+    side = Path(str(source_path.with_suffix("")) + LOOK_SUFFIX)
+    if not side.exists():
+        return
+    try:
+        shutil.move(str(side), str(Path(str(dest.with_suffix("")) + LOOK_SUFFIX)))
+    except OSError:
+        logger.warning("Could not archive the colour sidecar for %s", source_path.name,
+                       exc_info=True)
 
 
 _FFMPEG_MISSING_MESSAGE = (
