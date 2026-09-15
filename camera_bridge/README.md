@@ -100,6 +100,23 @@ path is genuinely 10G. A whole idle control cycle (connect + `get_state` +
 disconnect) measures **under 100 ms**, so camera reads are not what makes the
 record badge lag.
 
+## SDK full-frame rendering: too slow to replace the LUT
+
+`fit_look.py` (see the main `README.md`) fits a LUT from a handful of frames
+rendered through the SDK's own `PhGetCineImage(UC_VIEW)` - the path PCC/Resolve
+use - and applies that LUT with ffmpeg to every frame. The obvious follow-up
+question was whether to skip the fit entirely and render every frame through
+the SDK directly. `bench_render.py` answers it: **no.**
+
+Measured 2026-09-15 on camera 25628's `25628_p1_20260910-190001.cine` (4096x2160,
+670 frames): `PhGetCineImage(UC_VIEW)` sustains **~8.5 fps / ~430 MB/s**,
+identical across LogMode 0/1/2. A full unsampled walk (78.78s) matched a sparse
+`--every 50` sample's extrapolation (82.5s) almost exactly, so the sample is
+trustworthy and this isn't a caching artefact. At 8.5 fps, a single ~11-22s take
+takes over a minute to render - orders of magnitude slower than raw download
+(~542 MB/s) or ffmpeg's decode+LUT pass. The SDK call is fine for `fit_look.py`
+sampling a few frames, not for rendering whole clips.
+
 ## Cancelling a download
 
 Not via `PhStopWriteCineFileAsync`. PhFile.Dll exports it and it looks like the
