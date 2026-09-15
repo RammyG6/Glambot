@@ -1,4 +1,8 @@
-# Phantom look, LogMode=0
+# Phantom look, LogMode=0 - identical to looks/camera.cube.
+# Phantom's SDK (camera_bridge/bridge.py: COLOR_PROFILES) names LogMode 0
+# "Rec709" itself, so Glambot's "camera" and "rec709" profiles are the same
+# SDK render; this is a separate file rather than an alias so the two can
+# diverge later without touching each other.
 # Fitted from PhGetCineImage(UC_VIEW) by camera_bridge/fit_look.py.
 # Input domain: ffmpeg's raw linear RGB AFTER the cine's calib matrix.
 # Clips: 25628_p1_20260910-184101.cine, 25628_p1_20260910-184740.cine, 25628_p1_20260910-185121.cine, 25628_p1_20260910-185514.cine, 25628_p1_20260910-190001.cine, 25628_p1_20260910-190218.cine, 25628_p1_20260910-191712.cine, 25628_p1_20260910-192058.cine, 25628_p1_20260910-193143.cine, 25628_p1_20260910-193403.cine, 25628_p1_20260910-193602.cine, 25628_p1_20260910-193812.cine, 25628_p1_20260910-194032.cine, 25628_p1_20260910-194340.cine, 25628_p1_20260910-194613.cine, 25628_p1_20260910-194941.cine, 25628_p1_20260910-195259.cine, 25628_p1_20260910-195733.cine, 25628_p1_20260910-195923.cine, 25628_p1_20260910-200148.cine, 25628_p1_20260910-202647.cine, 25628_p1_20260910-204814.cine, 25628_p1_20260910-205531.cine, 25628_p1_20260910-205716.cine

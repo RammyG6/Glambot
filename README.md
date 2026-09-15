@@ -142,12 +142,14 @@ soundtracks/
   the mode above, so it combines with any of them — the form shows it as the
   **"Full automation — deliver without approval"** checkbox. See "Full
   automation" below.
-- `color_profile` (optional, one of `camera` / `log1` / `log2` / `rec709`,
+- `color_profile` (optional, one of `camera` / `rec709` / `log1` / `log2`,
   default `camera`): the look applied to raw Phantom `.cine` footage before
-  `grade`. `camera`, `log1` and `log2` are reproduced from the Phantom SDK's own
-  renderer through fitted LUTs in `looks/` — measured within 0.6% of it, so they
-  match what PCC shows. `rec709` is Glambot's own fixed 2.2 gamma and is an
-  approximation. Other footage is unaffected. See "Phantom colour" below.
+  `grade`. All four are reproduced from the Phantom SDK's own renderer through
+  fitted LUTs in `looks/`, so they match what PCC shows (`camera` and `rec709`
+  are the same underlying SDK render — Phantom's own SDK names LogMode 0
+  "Rec709"). A profile whose `.cube` is missing falls back to a fixed-curve
+  approximation instead. Other footage is unaffected. See "Phantom colour"
+  below.
 - `grade` (optional, `{ "exposure": 0.0, "contrast": 1.0, "saturation": 1.0,
   "white_balance": 0 }`): exposure in stops (-5..5), contrast (0.5..2),
   saturation (0..2, 0 is monochrome), white balance (-100 warm .. 100 cool).
@@ -298,20 +300,29 @@ produces — visibly wrong, not a rounding difference.
 Instead, `camera_bridge/fit_look.py` asks the SDK to render frames itself
 (`PhGetCineImage` under `UC_VIEW`, the path PCC's viewer uses) and fits a LUT
 from ffmpeg's raw decode to that output. The render chain is then just the
-clip's own colour matrix plus that LUT — **~0.5% mean error**, at full ffmpeg
-speed, with downloads still raw at 542 MB/s.
+clip's own colour matrix plus that LUT, at full ffmpeg speed, with downloads
+still raw at 542 MB/s. Fitted from 24 clips x 7 frame offsets each, spread
+across every take rather than just its first frame: **mean error 0.9-1.5%**
+depending on profile, p95 4.8-9.3%. Error rises measurably later in a take —
+a real sensor black-level drift the static per-clip matrix doesn't track, not
+a fitting artefact — so the residual partly reflects that drift rather than
+fit quality alone. Both figures are still far below the ~10% reconstruction
+error above.
 
 `GCI_LOGMODE` is a *cine header* field rather than a camera capability, so the
 SDK renders Vision Research's Log1/Log2 from ordinary raw clips even though this
 body cannot record log (camera-side `gsSupportsLogMode` = 0, while the file
-cine's `GCI_SUPPORTSLOGMODE` = 1).
+cine's `GCI_SUPPORTSLOGMODE` = 1). Phantom's own SDK names LogMode 0 "Rec709"
+(`camera_bridge/bridge.py`'s `COLOR_PROFILES`), so Glambot's `camera` and
+`rec709` profiles are fitted from the same LogMode and are the same render —
+`looks/rec709.cube` is a separate file from `looks/camera.cube`, not an
+alias, so the two can diverge later without touching each other.
 
 To refit — after a camera calibration change, or to add coverage:
 
 ```
-camera_bridge
-untime\Scripts\python.exe camera_bridgeit_look.py ^
-    --out looks\log1.cube --logmode 1 --offsets 0,200 <clips...>
+camera_bridge\runtime\Scripts\python.exe camera_bridge\fit_look.py ^
+    --out looks\log1.cube --logmode 1 --offsets 0,100,200,300,400,500,600 <clips...>
 ```
 
 It needs each clip's `.look.json` sidecar for the colour matrix (run **Backfill
@@ -319,8 +330,8 @@ colour** on the Phantom import page first) and prints its residual against the
 SDK. Fit from several clips: a LUT only knows the input range its samples
 covered. Clips are never modified — `PhSetCineInfo` acts on the open handle.
 
-A profile with no `.cube` falls back to the hand-built chain, which is why
-`rec709` still works and why nothing breaks if `looks/` is missing.
+A profile with no `.cube` falls back to the hand-built chain, which is why a
+profile still works and why nothing breaks if `looks/` is missing.
 
 ### Advanced editing
 

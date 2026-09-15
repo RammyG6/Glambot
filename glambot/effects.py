@@ -303,15 +303,21 @@ def build_grade_filter(grade: Grade | None, ffmpeg_bin: str) -> str:
 # default; the others replace that tone stage with a fixed curve.
 #
 # FALLBACK ONLY. These are Glambot's own curves, tuned by eye - they are NOT
-# Vision Research's Log1/Log2 and must never be described to a client as
-# matching PCC. They are used only when a profile has no fitted LUT in looks/,
-# and measured ~10% mean error against what the SDK actually renders.
+# Vision Research's Rec709/Log1/Log2 and must never be described to a client
+# as matching PCC. They are used only when a profile has no fitted LUT in
+# looks/, and measured ~10% mean error against what the SDK actually renders.
 #
-# The real Log1/Log2 come from looks/*.cube instead (see look_lut_path and
-# camera_bridge/fit_look.py), fitted from the SDK's own renderer to ~0.5%.
-# `GCI_LOGMODE` is a *cine header* field, so the SDK renders log from an
-# ordinary raw clip even though this body cannot record it - the camera-side
-# gsSupportsLogMode reads 0 while the file cine's GCI_SUPPORTSLOGMODE reads 1.
+# The real Rec709/Log1/Log2 come from looks/*.cube instead (see look_lut_path
+# and camera_bridge/fit_look.py), fitted from the SDK's own renderer to
+# ~0.9-1.5% mean / ~4.8-9.3% p95 (fitted across whole takes, not just their
+# first frame - the tail of that range is intra-take sensor drift the fit
+# can't track, not fit error). `GCI_LOGMODE` is a *cine header* field, so the
+# SDK renders log from an ordinary raw clip even though this body cannot
+# record it - the camera-side gsSupportsLogMode reads 0 while the file cine's
+# GCI_SUPPORTSLOGMODE reads 1. The SDK itself names LogMode 0 "Rec709"
+# (camera_bridge/bridge.py's COLOR_PROFILES), so `camera` and `rec709` here
+# are fitted from the same LogMode and render alike; looks/rec709.cube is a
+# separate file from looks/camera.cube so the two can diverge later.
 #
 # NB on direction: ffmpeg's `eq` applies output = input^(1/gamma), so a *higher*
 # gamma lifts shadows. A flat/log look wants lifted blacks and reduced contrast,
@@ -509,7 +515,7 @@ def look_lut_path(profile: str | None) -> Path | None:
 
     These beat the hand-built chain by a wide margin - measured against the SDK
     on real footage, the reconstruction runs ~10% mean error while the LUT runs
-    ~0.5% - because the LUT is fitted from what Phantom's own code produces
+    ~0.9-1.5% - because the LUT is fitted from what Phantom's own code produces
     rather than assembled from the header and hope.
     """
     # _normalise_profile only ever returns a name we ship, so a config value

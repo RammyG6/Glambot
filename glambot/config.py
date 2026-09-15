@@ -55,9 +55,11 @@ VALID_OVERLAY_POSITIONS = {
 
 VALID_DELIVERY_MODES = {"email", "qr_only"}
 
-# Base look for raw Phantom .cine footage. "camera", "log1" and "log2" are
-# reproduced from the SDK's own renderer via fitted LUTs (looks/*.cube, see
-# camera_bridge/fit_look.py); "rec709" has no LUT and stays an approximation.
+# Base look for raw Phantom .cine footage. All four are reproduced from the
+# SDK's own renderer via fitted LUTs (looks/*.cube, see
+# camera_bridge/fit_look.py) - "camera" and "rec709" are fitted from the same
+# LogMode (the SDK itself names LogMode 0 "Rec709"), so they render alike. A
+# profile whose .cube is missing falls back to a fixed-curve approximation.
 VALID_COLOR_PROFILES = ("camera", "rec709", "log1", "log2")
 VALID_ROTATIONS = {0, 90, -90, 180}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
