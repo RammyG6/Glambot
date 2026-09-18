@@ -84,6 +84,59 @@ something goes wrong, so errors are never lost to a flashing window.
 pause-on-error; useful if you want to run it from a terminal instead of double-clicking, e.g.
 while debugging.)
 
+## Serving guests / an iPad over the LAN
+
+By default Glambot only listens on `127.0.0.1` (this PC). To let guest phones
+download clips, or to control Glambot from an iPad, you need a shared network
+and two `.env` changes.
+
+**Network** — either works, no internet required:
+- **A travel Wi-Fi router** — plug the Glambot PC in (Ethernet or Wi-Fi) and
+  have guests join the same router's SSID.
+- **Windows Mobile Hotspot** — Settings → Network & internet → Mobile hotspot.
+  The PC broadcasts its own Wi-Fi; guests join that. (~8 device limit, and it
+  can't run at the same time as the PC using Wi-Fi for internet.)
+
+**`.env`:**
+```
+BIND_HOST=0.0.0.0
+GLAMBOT_PIN=1234          # required once you're on the LAN - any 4+ chars
+LAN_SSID=YourEventWifi    # optional: adds a "Join Wi-Fi" QR to the kiosk/photo
+LAN_PASSWORD=...
+PUBLIC_BASE_URL=          # optional: force a URL, e.g. http://192.168.8.1:5000
+```
+
+Then restart Glambot. Find this PC's address with `ipconfig` (the IPv4 address,
+e.g. `192.168.8.101`) — guests/iPad open `http://192.168.8.101:5000`.
+
+- The **GlambotSetup.exe installer** adds a Windows Firewall rule for TCP 5000
+  automatically. If you run from source, Windows will prompt once to "allow"
+  Python through the firewall — click **Allow**.
+- The tray/desktop window keeps working with no PIN prompt — loopback requests
+  are always trusted.
+- Per-project guest downloads still need that project's own **download PIN**
+  (set on the project form), separate from `GLAMBOT_PIN`.
+
+## Camera FTP auto-import (FX6 etc.)
+
+Glambot has a **built-in FTP server** — you no longer need to run FileZilla
+Server. Open the **FTP import** tab in the sidebar:
+
+1. Set the **Import folder** (default `D:\GlambotAuto_Import`) — click *Create it*
+   if it doesn't exist yet.
+2. Leave **Allow anonymous upload** ticked for a dedicated camera↔PC network, or
+   set a username/password.
+3. Click **Start**. Once running it auto-starts with Glambot on future launches.
+4. On the camera's FTP profile, enter the values shown in the **Camera setup**
+   card: this PC's IP, port **2121**, passive mode, upload directory `/`.
+5. In **Projects → Edit**, point that project's *footage source folder* at the
+   same Import folder. Uploaded clips are then processed automatically.
+
+The port (default 2121) avoids needing administrator rights. If Windows Firewall
+isn't allowing camera connections, the tab shows an **Apply firewall rule**
+button (and prompts on server start) — click it and confirm the one Windows
+permission dialog.
+
 ## Troubleshooting
 
 - **A window flashes and closes / "python not recognized":** Python isn't on PATH — reinstall

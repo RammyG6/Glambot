@@ -8,12 +8,19 @@ soundtracks/
 *.sqlite
 *.sqlite3
 *.log
+.glambot/
 .env
 credentials.json
 token.json
+# Local FTP-server export — machine-specific, contains a user password hash
+FTP_FX6_Config.xml
+*_Config.xml
 
 # Python
 .venv/
+# Embedded Python 3.11 runtime for the Phantom camera bridge (built locally /
+# at packaging time; see camera_bridge/README.md). ~370 MB, machine-specific.
+camera_bridge/runtime/
 __pycache__/
 *.pyc
 *.egg-info/
@@ -28,3 +35,6 @@ windows_app/dist/
 windows_app/vendor/*.exe
 windows_app/*.exe
 windows_app/glambotlogo.ico
+
+# Local backups
+*.bak

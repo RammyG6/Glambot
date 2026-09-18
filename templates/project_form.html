@@ -1,3 +1,4 @@
+{% from "_advanced_editor.html" import advanced_editor %}
 <!doctype html>
 <html lang="en">
 <head>
@@ -5,12 +6,6 @@
 <title>Glambot — {{ 'Edit Project' if mode == 'edit' else 'New Project' }}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  body { max-width: none; padding: 0; margin: 0; }
-  @media (max-width: 900px) {
-    .sidebar { position: static; height: auto; width: 100% !important; }
-    .app-shell { flex-direction: column; }
-    .main { padding: 1.5rem 1.25rem 3rem; }
-  }
   .layout { display: flex; gap: 2rem; align-items: flex-start; flex-wrap: wrap; }
   form { flex: 1 1 420px; min-width: 320px; }
   .preview-col { flex: 0 0 280px; position: sticky; top: 2rem; }
@@ -19,15 +14,23 @@
   .preview-caption { text-align: center; color: var(--text-secondary); font-size: .78rem; margin-top: .6rem; }
   .browse-row { display: flex; gap: .5rem; align-items: flex-start; margin-top: .35rem; }
   .browse-row input { flex: 1; margin-top: 0; }
-  .folder-browser { display: none; border: 1px solid var(--border); border-radius: var(--radius-sm); margin-top: .5rem; padding: .6rem; background: var(--bg-elevated-2); max-height: 220px; overflow-y: auto; }
-  .folder-browser.open { display: block; }
-  .folder-browser .crumb { font-size: .78rem; color: var(--text-secondary); margin-bottom: .4rem; word-break: break-all; }
-  .folder-browser ul { list-style: none; margin: 0; padding: 0; }
-  .folder-browser li { padding: .4rem .5rem; cursor: pointer; border-radius: 6px; font-size: .85rem; }
-  .folder-browser li:hover { background: rgba(255,255,255,0.08); }
+  .soundtrack-tools { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-top: .6rem; }
+  .soundtrack-tools .hint { margin: 0; }
+  .soundtrack-tools audio { display: none; }
+  .soundtrack-delete { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-top: .5rem; }
+  .soundtrack-delete.hidden { display: none; }
+  .soundtrack-delete-pw { width: 160px; margin: 0; }
+  .form-tabs { display: flex; gap: .4rem; margin-bottom: 1.25rem; border-bottom: 1px solid var(--border); }
+  .form-tab { background: none; border: none; color: var(--text-secondary); font: inherit; font-weight: 600; padding: .5rem .9rem; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .form-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .form-panel.hidden { display: none; }
+  .radio-label { display: flex; align-items: center; gap: .5rem; font-weight: 500; margin: .35rem 0; cursor: pointer; }
+  .radio-label input { width: auto; margin: 0; }
+  .is-disabled { opacity: .45; }
+  .is-disabled input, .is-disabled select { pointer-events: none; }
 </style>
 </head>
-<body>
+<body class="page-full">
 <div class="app-shell">
   {% set nav_mode = 'links' %}
   {% set active_tab = 'projects' %}
@@ -44,12 +47,34 @@
       <p class="main-sub">Fills in config.json for you — no need to hand-write it. After saving, drop footage into the project's folder to start processing.</p>
     {% endif %}
 
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+
     {% if error %}
       <div class="flash error">{{ error }}</div>
     {% endif %}
 
+    {% if asset_warnings %}
+      <div class="flash error">
+        Some files this project references are missing on disk — it still runs, without them:
+        <ul style="margin:.4rem 0 0 1.2rem">{% for w in asset_warnings %}<li><code>{{ w }}</code></li>{% endfor %}</ul>
+      </div>
+    {% endif %}
+
     <div class="layout">
       <form method="post" enctype="multipart/form-data" id="projectForm">
+        <div class="form-tabs" role="tablist">
+          <button type="button" class="form-tab active" data-form-tab="basic">Basic</button>
+          <button type="button" class="form-tab" data-form-tab="overlay">Overlay</button>
+          <button type="button" class="form-tab" data-form-tab="soundtrack">Soundtrack</button>
+          <button type="button" class="form-tab" data-form-tab="advanced">Advanced editing</button>
+          <button type="button" class="form-tab" data-form-tab="email">Email template</button>
+        </div>
+
+        <div class="form-panel" data-form-panel="basic">
         <fieldset>
           <legend>Project</legend>
           <label for="project_name">Project name</label>
@@ -60,17 +85,6 @@
           {% else %}
             <p class="hint">Becomes the folder name under inbox/ — letters, numbers, spaces, - or _ only.</p>
           {% endif %}
-
-          <label for="delivery_mode">Delivery method</label>
-          <select id="delivery_mode" name="delivery_mode">
-            {% for val, label in delivery_modes %}
-              <option value="{{ val }}" {% if values.get('delivery_mode', 'email') == val %}selected{% endif %}>{{ label }}</option>
-            {% endfor %}
-          </select>
-          <p class="hint">Operators can override this per clip on the Approve screen.</p>
-
-          <label for="recipient_email" id="recipient_email_label">Client email</label>
-          <input type="email" id="recipient_email" name="recipient_email" value="{{ values.get('recipient_email', '') }}">
 
           <div class="row">
             <div>
@@ -84,39 +98,67 @@
           </div>
           <p class="hint">Leave either side blank to not trim that side — leave both blank to export the full clip untrimmed.</p>
 
-          <label class="checkbox-label">
-            <input type="checkbox" id="auto_deliver" name="auto_deliver" {% if values.get('auto_deliver') == 'on' %}checked{% endif %}>
-            Fully automatic delivery
-          </label>
-          <p class="hint">Clips upload and deliver automatically as soon as they're processed — no per-clip Approve click. For QR-kiosk mode, open the project's "now showing" link (/projects/&lt;name&gt;/kiosk) on a venue monitor and it stays current on its own.</p>
-
           <label for="source_dir">Footage source folder (optional)</label>
           <div class="browse-row">
             <input type="text" id="source_dir" name="source_dir" placeholder="Leave blank to use inbox/&lt;project name&gt;/" value="{{ values.get('source_dir', '') }}">
-            <button type="button" class="btn btn-secondary btn-sm" id="browseButton">Browse&hellip;</button>
-          </div>
-          <div class="folder-browser" id="folderBrowser">
-            <div class="crumb" id="folderBrowserPath"></div>
-            <ul id="folderBrowserList"></ul>
-            <button type="button" class="btn btn-secondary btn-sm" id="useThisFolder">Use this folder</button>
+            <button type="button" class="btn btn-secondary btn-sm pick-folder-btn" data-target="source_dir">Browse&hellip;</button>
           </div>
           <p class="hint">Point at any folder on this machine (e.g. an SD-card import folder) instead of dropping footage into inbox/. Leave blank for the default location.</p>
 
           <label for="output_dir">Custom output location (optional)</label>
           <div class="browse-row">
             <input type="text" id="output_dir" name="output_dir" placeholder="Leave blank to use the project's own folder" value="{{ values.get('output_dir', '') }}">
-            <button type="button" class="btn btn-secondary btn-sm" id="browseButton2">Browse&hellip;</button>
-          </div>
-          <div class="folder-browser" id="folderBrowser2">
-            <div class="crumb" id="folderBrowserPath2"></div>
-            <ul id="folderBrowserList2"></ul>
-            <button type="button" class="btn btn-secondary btn-sm" id="useThisFolder2">Use this folder</button>
+            <button type="button" class="btn btn-secondary btn-sm pick-folder-btn" data-target="output_dir">Browse&hellip;</button>
           </div>
           <p class="hint">Choose the parent folder only — Glambot creates "&lt;project name&gt;_Output" inside it automatically. Leave blank to keep processed clips inside the project's own folder.</p>
 
           <label for="drive_folder_id">Google Drive destination folder (optional)</label>
           <input type="text" id="drive_folder_id" name="drive_folder_id" placeholder="Paste a folder ID or its share link" value="{{ values.get('drive_folder_id', '') }}">
           <p class="hint">Open the folder in Google Drive and paste its URL (or just the ID) here. Leave blank to use the default folder configured in .env for every project.</p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Mode</legend>
+          {% set delivery_flow = values.get('mode', 'standard') %}
+          <label class="radio-label">
+            <input type="radio" name="mode" value="standard" {% if delivery_flow == 'standard' %}checked{% endif %}>
+            Standard &mdash; manual approve
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="mode" value="lan" {% if delivery_flow == 'lan' %}checked{% endif %}>
+            Local Wi-Fi download link
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="mode" value="offline" {% if delivery_flow == 'offline' %}checked{% endif %}>
+            Fully offline &mdash; no internet
+          </label>
+          <p class="hint" id="modeHint"></p>
+
+          <label class="check-label">
+            <input type="checkbox" id="full_automation" name="full_automation"
+                   {% if values.get('full_automation') %}checked{% endif %}>
+            Full automation &mdash; deliver without approval
+          </label>
+          <p class="hint">Clips go straight to the guest as soon as they finish rendering, with no
+            Approve step. Works with any of the modes above. Nobody sees a clip before the guest does,
+            so a bad render goes out unnoticed.</p>
+
+          <label for="delivery_mode">Delivery method</label>
+          <select id="delivery_mode" name="delivery_mode">
+            {% for val, label in delivery_modes %}
+              <option value="{{ val }}" {% if values.get('delivery_mode', 'email') == val %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+          <p class="hint">Operators can override this per clip on the Approve screen.</p>
+
+          <label for="recipient_email" id="recipient_email_label">Client email</label>
+          <input type="email" id="recipient_email" name="recipient_email" value="{{ values.get('recipient_email', '') }}">
+
+          <div id="downloadPinRow">
+            <label for="download_pin">Guest download PIN <span class="muted">(optional)</span></label>
+            <input type="text" id="download_pin" name="download_pin" inputmode="numeric" pattern="\d{4,8}" placeholder="e.g. 4821" value="{{ values.get('download_pin', '') }}">
+            <p class="hint">4-8 digits. Leave blank and guests download with no password prompt. If set, guests type it before downloading &mdash; print it on the QR card.</p>
+          </div>
         </fieldset>
 
         <fieldset>
@@ -160,6 +202,35 @@
                 <option value="custom" {% if values.get('bitrate_preset') == 'custom' %}selected{% endif %}>Custom&hellip;</option>
               </select>
               <input type="text" class="hidden" id="custom_bitrate" name="custom_bitrate" placeholder="e.g. 10M" value="{{ values.get('custom_bitrate', '') }}">
+            </div>
+          </div>
+
+          <div class="row">
+            <div>
+              <label for="source_fps">Source frame rate (raw footage)</label>
+              <input type="number" id="source_fps" name="source_fps" min="1" max="1000" step="0.001"
+                     placeholder="e.g. 25" value="{{ values.get('source_fps', '') }}">
+              <p class="hint">Leave blank: footage that reports a high capture rate (e.g. a Phantom <code>.cine</code> at 200&nbsp;fps) is played back at 25&nbsp;fps automatically; normal video is unchanged. Enter a number to force a specific playback rate for this project.</p>
+            </div>
+          </div>
+
+          <div class="row">
+            <div>
+              <label for="color_profile">Colour profile (raw footage)</label>
+              <select id="color_profile" name="color_profile">
+                {% for val, label in [
+                     ('camera', 'Camera &mdash; what the camera recorded (default)'),
+                     ('rec709', 'Rec709 &mdash; Vision Research Rec709'),
+                     ('log1',   'Log1 &mdash; Vision Research Log1'),
+                     ('log2',   'Log2 &mdash; Vision Research Log2')] %}
+                  <option value="{{ val }}" {% if values.get('color_profile', 'camera') == val %}selected{% endif %}>{{ label|safe }}</option>
+                {% endfor %}
+              </select>
+              <p class="hint">The look applied to raw Phantom <code>.cine</code> footage before the
+                Colour &amp; exposure grade below. All four are reproduced from the Phantom SDK's own
+                renderer &mdash; measured within 1.5% of it &mdash; so they match what PCC shows, not an
+                approximation. <strong>Camera</strong> and <strong>Rec709</strong> are the same underlying
+                SDK render. Other footage is unaffected.</p>
             </div>
           </div>
 
@@ -216,60 +287,7 @@
               <option value="custom" {% if values.get('second_bitrate_preset') == 'custom' %}selected{% endif %}>Custom&hellip;</option>
             </select>
             <input type="text" class="hidden" id="second_custom_bitrate" name="second_custom_bitrate" placeholder="e.g. 10M" value="{{ values.get('second_custom_bitrate', '') }}">
-            <p class="hint">Both resolutions upload and deliver together from a single Approve click.</p>
-
-            <label for="second_overlay_file" style="margin-top:1rem;">Second overlay image (optional)</label>
-            <input type="file" id="second_overlay_file" name="second_overlay_file" accept="image/*">
-            {% if mode == 'edit' and existing_second_overlay %}
-              <p class="hint">Current second overlay: <code>{{ existing_second_overlay }}</code> — leave blank to keep it, choose a file to replace it.</p>
-            {% else %}
-              <p class="hint">A separate overlay for the second resolution (e.g. a horizontal logo for a 16:9 cut). Leave empty for no overlay on the second export.</p>
-            {% endif %}
-
-            <label for="second_overlay_position">Position</label>
-            <select id="second_overlay_position" name="second_overlay_position">
-              {% for pos in overlay_positions %}
-                <option value="{{ pos }}" {% if values.get('second_overlay_position', 'full') == pos %}selected{% endif %}>{{ pos }}</option>
-              {% endfor %}
-            </select>
-
-            <label for="second_overlay_scale">Size (% of frame width) — <span class="slider-value" id="second_overlay_scale_value">{{ values.get('second_overlay_scale', 30) }}</span>%</label>
-            <input type="range" id="second_overlay_scale" name="second_overlay_scale" min="1" max="100" value="{{ values.get('second_overlay_scale', 30) }}">
-
-            <div id="secondCustomPositionRow" class="hidden">
-              <label for="second_overlay_x">Horizontal position — <span class="slider-value" id="second_overlay_x_value">{{ values.get('second_overlay_x', 50) }}</span>%</label>
-              <input type="range" id="second_overlay_x" name="second_overlay_x" min="0" max="100" value="{{ values.get('second_overlay_x', 50) }}">
-              <label for="second_overlay_y">Vertical position — <span class="slider-value" id="second_overlay_y_value">{{ values.get('second_overlay_y', 50) }}</span>%</label>
-              <input type="range" id="second_overlay_y" name="second_overlay_y" min="0" max="100" value="{{ values.get('second_overlay_y', 50) }}">
-            </div>
-          </div>
-        </fieldset>
-
-        <fieldset>
-          <legend>Overlay graphic (optional)</legend>
-          <label for="overlay_file">Overlay image</label>
-          <input type="file" id="overlay_file" name="overlay_file" accept="image/*">
-          {% if mode == 'edit' and existing_overlay %}
-            <p class="hint">Current overlay: <code>{{ existing_overlay }}</code> — leave blank to keep it, choose a file to replace it.</p>
-          {% else %}
-            <p class="hint">Leave empty for no overlay — the clip is exported clean.</p>
-          {% endif %}
-
-          <label for="overlay_position">Position</label>
-          <select id="overlay_position" name="overlay_position">
-            {% for pos in overlay_positions %}
-              <option value="{{ pos }}" {% if values.get('overlay_position', 'full') == pos %}selected{% endif %}>{{ pos }}</option>
-            {% endfor %}
-          </select>
-
-          <label for="overlay_scale">Size (% of frame width) — <span class="slider-value" id="overlay_scale_value">{{ values.get('overlay_scale', 30) }}</span>%</label>
-          <input type="range" id="overlay_scale" name="overlay_scale" min="1" max="100" value="{{ values.get('overlay_scale', 30) }}">
-
-          <div id="customPositionRow" class="hidden">
-            <label for="overlay_x">Horizontal position — <span class="slider-value" id="overlay_x_value">{{ values.get('overlay_x', 50) }}</span>%</label>
-            <input type="range" id="overlay_x" name="overlay_x" min="0" max="100" value="{{ values.get('overlay_x', 50) }}">
-            <label for="overlay_y">Vertical position — <span class="slider-value" id="overlay_y_value">{{ values.get('overlay_y', 50) }}</span>%</label>
-            <input type="range" id="overlay_y" name="overlay_y" min="0" max="100" value="{{ values.get('overlay_y', 50) }}">
+            <p class="hint">Both resolutions upload and deliver together from a single Approve click. Each uses whichever overlay (vertical / horizontal) matches its own shape — set those on the Overlay tab.</p>
           </div>
         </fieldset>
 
@@ -287,42 +305,147 @@
           <input type="range" id="background_opacity" name="playback_background_opacity" min="0" max="100" value="{{ values.get('playback_background_opacity', 50) }}">
         </fieldset>
 
-        <fieldset>
-          <legend>Soundtrack (optional)</legend>
-          <label for="soundtrack_choice">Soundtrack</label>
-          <select id="soundtrack_choice" name="soundtrack_choice">
-            <option value="__none__" {% if values.get('soundtrack_choice', '__none__') == '__none__' %}selected{% endif %}>None</option>
-            <option value="__upload__" {% if values.get('soundtrack_choice') == '__upload__' %}selected{% endif %}>Upload new file&hellip;</option>
-            {% for name in existing_soundtracks %}
-              <option value="{{ name }}" {% if values.get('soundtrack_choice') == name %}selected{% endif %}>{{ name }}</option>
+        </div><!-- /basic panel -->
+
+        {% set _warn_blob = (asset_warnings | join(' ')) if asset_warnings else '' %}
+        <div class="form-panel hidden" data-form-panel="overlay">
+          <fieldset>
+            <legend>Overlay graphics (optional)</legend>
+            <p class="hint">One overlay per orientation. When a clip renders — or when you flip a project's aspect ratio — Glambot picks the overlay that matches the output shape. Placement previews on the right.</p>
+            {% for prefix, title, existing in [
+                ('vertical_', 'Vertical (9:16) overlay', existing_vertical_overlay),
+                ('horizontal_', 'Horizontal (16:9) overlay', existing_horizontal_overlay)] %}
+            {% set missing = existing and (existing in _warn_blob) %}
+            <label for="{{ prefix }}overlay_file" style="font-weight:600;margin-top:.8rem">{{ title }}</label>
+            <input type="file" id="{{ prefix }}overlay_file" name="{{ prefix }}overlay_file" accept="image/*">
+            {% if mode == 'edit' and existing %}
+              {% if missing %}
+                <p class="flash error" style="margin:.4rem 0">⚠ <code>{{ existing }}</code> is missing on disk — upload a replacement, or tick "Remove this overlay" below.</p>
+              {% else %}
+                <p class="hint">Current: <code>{{ existing }}</code> — leave blank to keep it, choose a file to replace it.</p>
+              {% endif %}
+              <label class="checkbox-label"><input type="checkbox" name="{{ prefix }}overlay_remove"> Remove this overlay</label>
+            {% else %}
+              <p class="hint">Leave blank for no overlay on this orientation.</p>
+            {% endif %}
+
+            <label for="{{ prefix }}overlay_position">Position</label>
+            <select id="{{ prefix }}overlay_position" name="{{ prefix }}overlay_position">
+              {% for pos in overlay_positions %}
+                <option value="{{ pos }}" {% if values.get(prefix ~ 'overlay_position', 'full') == pos %}selected{% endif %}>{{ pos }}</option>
+              {% endfor %}
+            </select>
+
+            <label for="{{ prefix }}overlay_scale">Size (% of frame width) — <span class="slider-value" id="{{ prefix }}overlay_scale_value">{{ values.get(prefix ~ 'overlay_scale', 30) }}</span>%</label>
+            <input type="range" id="{{ prefix }}overlay_scale" name="{{ prefix }}overlay_scale" min="1" max="100" value="{{ values.get(prefix ~ 'overlay_scale', 30) }}">
+
+            <div id="{{ prefix }}CustomPositionRow" class="hidden">
+              <label for="{{ prefix }}overlay_x">Horizontal position — <span class="slider-value" id="{{ prefix }}overlay_x_value">{{ values.get(prefix ~ 'overlay_x', 50) }}</span>%</label>
+              <input type="range" id="{{ prefix }}overlay_x" name="{{ prefix }}overlay_x" min="0" max="100" value="{{ values.get(prefix ~ 'overlay_x', 50) }}">
+              <label for="{{ prefix }}overlay_y">Vertical position — <span class="slider-value" id="{{ prefix }}overlay_y_value">{{ values.get(prefix ~ 'overlay_y', 50) }}</span>%</label>
+              <input type="range" id="{{ prefix }}overlay_y" name="{{ prefix }}overlay_y" min="0" max="100" value="{{ values.get(prefix ~ 'overlay_y', 50) }}">
+            </div>
             {% endfor %}
-          </select>
-          <input type="file" class="hidden" id="soundtrack_file" name="soundtrack_file" accept="audio/*">
+          </fieldset>
+        </div><!-- /overlay panel -->
 
-          <div class="row">
-            <div>
-              <label for="soundtrack_volume_db">Soundtrack volume (dB)</label>
-              <input type="number" id="soundtrack_volume_db" name="soundtrack_volume_db" step="0.5" placeholder="0" value="{{ values.get('soundtrack_volume_db', '') }}">
-            </div>
-            <div>
-              <label for="original_volume_db">Original audio volume (dB)</label>
-              <input type="number" id="original_volume_db" name="original_volume_db" step="0.5" placeholder="0" value="{{ values.get('original_volume_db', '') }}">
-            </div>
-          </div>
-          <p class="hint">-60 to +12 dB. 0 = unchanged; a very low value (e.g. -60) effectively mutes that side.</p>
+        <div class="form-panel hidden" data-form-panel="soundtrack">
+          <fieldset>
+            <legend>Soundtrack (optional)</legend>
+            <label for="soundtrack_choice">Soundtrack</label>
+            <select id="soundtrack_choice" name="soundtrack_choice">
+              <option value="__none__" {% if values.get('soundtrack_choice', '__none__') == '__none__' %}selected{% endif %}>None</option>
+              <option value="__upload__" {% if values.get('soundtrack_choice') == '__upload__' %}selected{% endif %}>Upload new file&hellip;</option>
+              {% for name in existing_soundtracks %}
+                <option value="{{ name }}" {% if values.get('soundtrack_choice') == name %}selected{% endif %}>{{ name }}</option>
+              {% endfor %}
+            </select>
+            <input type="file" class="hidden" id="soundtrack_file" name="soundtrack_file" accept="audio/*">
 
-          <div class="row">
-            <div>
-              <label for="soundtrack_trim_start">Soundtrack trim start</label>
-              <input type="text" id="soundtrack_trim_start" name="soundtrack_trim_start" placeholder="00:00:00" value="{{ values.get('soundtrack_trim_start', '') }}">
+            <div class="soundtrack-tools">
+              <button type="button" class="btn btn-secondary btn-sm" id="soundtrackTest">&#9654; Test trimmed section</button>
+              <button type="button" class="btn btn-ghost btn-sm hidden" id="soundtrackStop">&#9632; Stop</button>
+              <span class="hint" id="soundtrackTestHint"></span>
+              <audio id="soundtrackAudio" preload="none"></audio>
             </div>
-            <div>
-              <label for="soundtrack_trim_end">Soundtrack trim end</label>
-              <input type="text" id="soundtrack_trim_end" name="soundtrack_trim_end" placeholder="00:00:30" value="{{ values.get('soundtrack_trim_end', '') }}">
+            <div class="soundtrack-delete hidden" id="soundtrackDeleteRow">
+              <input type="password" class="soundtrack-delete-pw" id="soundtrackDeletePw" placeholder="Delete password" autocomplete="off">
+              <button type="button" class="btn btn-danger-ghost btn-sm" id="soundtrackDeleteBtn">Delete &ldquo;<span id="soundtrackDeleteName"></span>&rdquo; from library</button>
             </div>
-          </div>
-          <p class="hint">Optional — use just a portion of the track. Leave blank to use it from the start / play to its end.</p>
-        </fieldset>
+
+            <div class="row">
+              <div>
+                <label for="soundtrack_volume_db">Soundtrack volume (dB)</label>
+                <input type="number" id="soundtrack_volume_db" name="soundtrack_volume_db" step="0.5" placeholder="0" value="{{ values.get('soundtrack_volume_db', '') }}">
+              </div>
+              <div>
+                <label for="original_volume_db">Original audio volume (dB)</label>
+                <input type="number" id="original_volume_db" name="original_volume_db" step="0.5" placeholder="0" value="{{ values.get('original_volume_db', '') }}">
+              </div>
+            </div>
+            <p class="hint">-60 to +12 dB. 0 = unchanged; a very low value (e.g. -60) effectively mutes that side.</p>
+
+            <div class="row">
+              <div>
+                <label for="soundtrack_trim_start">Soundtrack trim start</label>
+                <input type="text" id="soundtrack_trim_start" name="soundtrack_trim_start" placeholder="00:00:00" value="{{ values.get('soundtrack_trim_start', '') }}">
+              </div>
+              <div>
+                <label for="soundtrack_trim_end">Soundtrack trim end</label>
+                <input type="text" id="soundtrack_trim_end" name="soundtrack_trim_end" placeholder="00:00:30" value="{{ values.get('soundtrack_trim_end', '') }}">
+              </div>
+            </div>
+            <p class="hint">Optional — use just a portion of the track. Leave blank to use it from the start / play to its end.</p>
+          </fieldset>
+        </div><!-- /soundtrack panel -->
+
+        <div class="form-panel hidden" data-form-panel="advanced">
+          <fieldset>
+            <legend>Colour, exposure &amp; speed ramp</legend>
+            {{ advanced_editor(values, 'project') }}
+          </fieldset>
+
+          <fieldset>
+            <legend>Preview</legend>
+            <p class="hint">Render a few seconds of a real clip with the settings above.</p>
+            {% if mode == 'edit' %}
+              <div class="row">
+                <div>
+                  <label for="preview_sample">Sample clip</label>
+                  <select id="preview_sample" name="preview_sample">
+                    <option value="">Newest footage in this project</option>
+                    {% for f in preview_samples %}<option value="{{ f }}">{{ f }}</option>{% endfor %}
+                  </select>
+                </div>
+                <div>
+                  <button type="button" class="btn btn-secondary" id="renderPreviewBtn" style="margin-top:1.7rem">Render preview</button>
+                </div>
+              </div>
+              <video id="previewVideo" class="hidden" controls playsinline style="width:100%;max-width:520px;border-radius:var(--radius-sm);margin-top:.75rem;background:#000"></video>
+              <p class="hint" id="previewStatus"></p>
+            {% else %}
+              <p class="hint">Save the project first, then reopen it here to render a preview.</p>
+            {% endif %}
+          </fieldset>
+        </div><!-- /advanced panel -->
+
+        <div class="form-panel hidden" data-form-panel="email">
+          <fieldset>
+            <legend>Email template</legend>
+            <p class="hint">Used whenever a clip from this project is delivered by email — including the per-clip override on the review card and <em>Email a delivered clip</em>. Leave blank to use the global default. Placeholders: <code>{link}</code>, <code>{link2}</code>, <code>{project}</code>, <code>{filename}</code>.</p>
+            <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.6rem">
+              <button type="button" class="btn btn-secondary btn-sm" id="emailTemplateToggle">Hide fields</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="emailTemplateClear">Clear template (use global default)</button>
+            </div>
+            <p class="hint" id="emailTemplateNote" style="display:none">Cleared — save the form to apply.</p>
+            <div id="emailTemplateFields">
+              <label for="email_subject">Subject</label>
+              <input type="text" id="email_subject" name="email_subject" value="{{ values.get('email_subject', '') }}" placeholder="{{ default_email_subject }}">
+              <label for="email_body">Message</label>
+              <textarea id="email_body" name="email_body" rows="9" placeholder="{{ default_email_body }}">{{ values.get('email_body', '') }}</textarea>
+            </div>
+          </fieldset>
+        </div><!-- /email panel -->
 
         <button type="submit" class="btn btn-primary">{{ 'Save Changes' if mode == 'edit' else 'Create Project' }}</button>
       </form>
@@ -331,14 +454,15 @@
         <div class="preview-frame" id="previewFrame">
           <img id="previewOverlay" style="display:none;">
         </div>
-        <p class="preview-caption">Approximate preview — actual export composites at full resolution.</p>
+        <p class="preview-caption">Vertical (9:16) overlay</p>
 
-        <div id="secondPreviewWrap" class="hidden" style="margin-top:1.5rem;">
+        <div id="secondPreviewWrap" style="margin-top:1.5rem;">
           <div class="preview-frame" id="secondPreviewFrame">
             <img id="secondPreviewOverlay" style="display:none;">
           </div>
-          <p class="preview-caption">Second resolution preview.</p>
+          <p class="preview-caption">Horizontal (16:9) overlay</p>
         </div>
+        <p class="preview-caption" style="margin-top:.6rem">Approximate — the export composites at full resolution.</p>
       </div>
     </div>
   </div>
@@ -348,6 +472,30 @@
 (function () {
   const deliveryMode = document.getElementById('delivery_mode');
   const recipientEmailLabel = document.getElementById('recipient_email_label');
+  const modeRadios = document.querySelectorAll('input[name="mode"]');
+  const modeHint = document.getElementById('modeHint');
+  const downloadPinRow = document.getElementById('downloadPinRow');
+  const downloadPin = document.getElementById('download_pin');
+
+  const MODE_HINTS = {
+    standard: 'Google Drive upload plus email. For kiosk QR, open the project’s /kiosk page on a venue monitor.',
+    lan: 'Adds a guest download page served straight from this PC (QR points at its LAN address), alongside Google Drive. Set a guest PIN below, or leave it blank for no-password downloads.',
+    offline: 'No internet: nothing is uploaded to Google Drive. The Wi-Fi download link is the only delivery. Set a guest PIN below, or leave it blank for no-password downloads.',
+  };
+  function currentMode() {
+    let v = 'standard';
+    modeRadios.forEach(function (r) { if (r.checked) v = r.value; });
+    return v;
+  }
+  function syncMode() {
+    const m = currentMode();
+    if (modeHint) modeHint.textContent = MODE_HINTS[m] || '';
+    const pinActive = (m === 'lan' || m === 'offline');
+    if (downloadPin) downloadPin.disabled = !pinActive;
+    if (downloadPinRow) downloadPinRow.classList.toggle('is-disabled', !pinActive);
+  }
+  modeRadios.forEach(function (r) { r.addEventListener('change', syncMode); });
+  syncMode();
 
   const resolutionPreset = document.getElementById('resolution_preset');
   const customResolutionRow = document.getElementById('customResolutionRow');
@@ -360,15 +508,22 @@
   const bitratePreset = document.getElementById('bitrate_preset');
   const customBitrate = document.getElementById('custom_bitrate');
 
-  const overlayFile = document.getElementById('overlay_file');
-  const overlayPosition = document.getElementById('overlay_position');
-  const overlayScale = document.getElementById('overlay_scale');
-  const overlayScaleValue = document.getElementById('overlay_scale_value');
-  const customPositionRow = document.getElementById('customPositionRow');
-  const overlayX = document.getElementById('overlay_x');
-  const overlayY = document.getElementById('overlay_y');
-  const overlayXValue = document.getElementById('overlay_x_value');
-  const overlayYValue = document.getElementById('overlay_y_value');
+  function overlayGroup(prefix) {
+    return {
+      file: document.getElementById(prefix + 'overlay_file'),
+      position: document.getElementById(prefix + 'overlay_position'),
+      scale: document.getElementById(prefix + 'overlay_scale'),
+      scaleValue: document.getElementById(prefix + 'overlay_scale_value'),
+      customRow: document.getElementById(prefix + 'CustomPositionRow'),
+      x: document.getElementById(prefix + 'overlay_x'),
+      y: document.getElementById(prefix + 'overlay_y'),
+      xValue: document.getElementById(prefix + 'overlay_x_value'),
+      yValue: document.getElementById(prefix + 'overlay_y_value'),
+      img: new Image(),
+    };
+  }
+  const vOverlay = overlayGroup('vertical_');
+  const hOverlay = overlayGroup('horizontal_');
 
   const secondResolutionEnabled = document.getElementById('second_resolution_enabled');
   const secondResolutionRow = document.getElementById('secondResolutionRow');
@@ -378,16 +533,6 @@
   const secondCustomHeight = document.getElementById('second_custom_height');
   const secondBitratePreset = document.getElementById('second_bitrate_preset');
   const secondCustomBitrate = document.getElementById('second_custom_bitrate');
-
-  const secondOverlayFile = document.getElementById('second_overlay_file');
-  const secondOverlayPosition = document.getElementById('second_overlay_position');
-  const secondOverlayScale = document.getElementById('second_overlay_scale');
-  const secondOverlayScaleValue = document.getElementById('second_overlay_scale_value');
-  const secondCustomPositionRow = document.getElementById('secondCustomPositionRow');
-  const secondOverlayX = document.getElementById('second_overlay_x');
-  const secondOverlayY = document.getElementById('second_overlay_y');
-  const secondOverlayXValue = document.getElementById('second_overlay_x_value');
-  const secondOverlayYValue = document.getElementById('second_overlay_y_value');
 
   const soundtrackChoice = document.getElementById('soundtrack_choice');
   const soundtrackFile = document.getElementById('soundtrack_file');
@@ -425,39 +570,39 @@
     customResolutionRow.classList.toggle('hidden', resolutionPreset.value !== 'custom');
     customFps.classList.toggle('hidden', fpsPreset.value !== 'custom');
     customBitrate.classList.toggle('hidden', bitratePreset.value !== 'custom');
-    customPositionRow.classList.toggle('hidden', overlayPosition.value !== 'custom');
+    vOverlay.customRow.classList.toggle('hidden', vOverlay.position.value !== 'custom');
+    hOverlay.customRow.classList.toggle('hidden', hOverlay.position.value !== 'custom');
     recipientEmailLabel.textContent = deliveryMode.value === 'qr_only' ? 'Client email (optional)' : 'Client email';
     secondResolutionRow.classList.toggle('hidden', !secondResolutionEnabled.checked);
     secondCustomResolutionRow.classList.toggle('hidden', secondResolutionPreset.value !== 'custom');
     secondCustomBitrate.classList.toggle('hidden', secondBitratePreset.value !== 'custom');
-    secondCustomPositionRow.classList.toggle('hidden', secondOverlayPosition.value !== 'custom');
-    secondPreviewWrap.classList.toggle('hidden', !secondResolutionEnabled.checked);
     soundtrackFile.classList.toggle('hidden', soundtrackChoice.value !== '__upload__');
   }
 
-  // Generic preview renderer — sizes the frame to the target resolution's
-  // aspect ratio and places the overlay image per its position/scale/x/y.
-  function renderPreview(frameEl, imgEl, res, posEl, scaleEl, xEl, yEl) {
+  // Sizes the frame to the given aspect ratio and places the overlay image per
+  // its position/scale/x/y.
+  function renderPreview(frameEl, imgEl, res, ov) {
     const [targetW, targetH] = res;
     const frameH = FRAME_W * (targetH / targetW);
     frameEl.style.width = FRAME_W + 'px';
     frameEl.style.height = frameH + 'px';
-    if (!imgEl.src) { imgEl.style.display = 'none'; return; }
+    if (!ov.img.src) { imgEl.style.display = 'none'; return; }
+    imgEl.src = ov.img.src;
 
-    const scalePct = parseFloat(scaleEl.value) || 30;
+    const scalePct = parseFloat(ov.scale.value) || 30;
     const overlayW = (scalePct / 100) * FRAME_W;
-    const naturalRatio = imgEl.naturalWidth ? imgEl.naturalHeight / imgEl.naturalWidth : 1;
+    const naturalRatio = ov.img.naturalWidth ? ov.img.naturalHeight / ov.img.naturalWidth : 1;
     const overlayH = overlayW * naturalRatio;
     const marginPreview = MARGIN_REAL_PX * (FRAME_W / targetW);
 
     let left = 0, top = 0;
-    const pos = posEl.value;
+    const pos = ov.position.value;
     if (pos === 'full') { left = 0; top = 0; }
     else if (pos === 'top-left') { left = marginPreview; top = marginPreview; }
     else if (pos === 'top-right') { left = FRAME_W - overlayW - marginPreview; top = marginPreview; }
     else if (pos === 'bottom-left') { left = marginPreview; top = frameH - overlayH - marginPreview; }
     else if (pos === 'bottom-right') { left = FRAME_W - overlayW - marginPreview; top = frameH - overlayH - marginPreview; }
-    else if (pos === 'custom') { left = (parseFloat(xEl.value) / 100) * FRAME_W; top = (parseFloat(yEl.value) / 100) * frameH; }
+    else if (pos === 'custom') { left = (parseFloat(ov.x.value) / 100) * FRAME_W; top = (parseFloat(ov.y.value) / 100) * frameH; }
 
     imgEl.style.width = overlayW + 'px';
     imgEl.style.height = 'auto';
@@ -467,22 +612,19 @@
   }
 
   function updatePreview() {
-    renderPreview(previewFrame, previewOverlay, targetResolution(), overlayPosition, overlayScale, overlayX, overlayY);
-    if (secondResolutionEnabled.checked) {
-      renderPreview(secondPreviewFrame, secondPreviewOverlay, secondResolution(), secondOverlayPosition, secondOverlayScale, secondOverlayX, secondOverlayY);
-    }
+    // Always show both orientations so each overlay can be placed.
+    renderPreview(previewFrame, previewOverlay, [1080, 1920], vOverlay);
+    renderPreview(secondPreviewFrame, secondPreviewOverlay, [1920, 1080], hOverlay);
   }
 
-  function wireOverlayFile(fileEl, imgEl) {
-    fileEl.addEventListener('change', function () {
-      const file = fileEl.files[0];
-      if (!file) { imgEl.src = ''; updatePreview(); return; }
-      imgEl.onload = updatePreview;
-      imgEl.src = URL.createObjectURL(file);
+  [vOverlay, hOverlay].forEach(function (ov) {
+    ov.file.addEventListener('change', function () {
+      const file = ov.file.files[0];
+      if (!file) { ov.img.src = ''; updatePreview(); return; }
+      ov.img.onload = updatePreview;
+      ov.img.src = URL.createObjectURL(file);
     });
-  }
-  wireOverlayFile(overlayFile, previewOverlay);
-  wireOverlayFile(secondOverlayFile, secondPreviewOverlay);
+  });
 
   function wireSlider(sliderEl, valueEl) {
     sliderEl.addEventListener('input', function () {
@@ -490,19 +632,19 @@
       updatePreview();
     });
   }
-  wireSlider(overlayScale, overlayScaleValue);
-  wireSlider(overlayX, overlayXValue);
-  wireSlider(overlayY, overlayYValue);
-  wireSlider(secondOverlayScale, secondOverlayScaleValue);
-  wireSlider(secondOverlayX, secondOverlayXValue);
-  wireSlider(secondOverlayY, secondOverlayYValue);
+  [vOverlay, hOverlay].forEach(function (ov) {
+    wireSlider(ov.scale, ov.scaleValue);
+    wireSlider(ov.x, ov.xValue);
+    wireSlider(ov.y, ov.yValue);
+  });
   backgroundOpacity.addEventListener('input', function () {
     backgroundOpacityValue.textContent = backgroundOpacity.value;
   });
 
-  [resolutionPreset, customWidth, customHeight, fpsPreset, bitratePreset, overlayPosition, deliveryMode,
+  [resolutionPreset, customWidth, customHeight, fpsPreset, bitratePreset, deliveryMode,
+   vOverlay.position, hOverlay.position,
    secondResolutionEnabled, secondResolutionPreset, secondCustomWidth, secondCustomHeight,
-   secondBitratePreset, secondOverlayPosition, soundtrackChoice].forEach(function (el) {
+   secondBitratePreset, soundtrackChoice].forEach(function (el) {
     el.addEventListener('change', function () {
       toggleVisibility();
       updatePreview();
@@ -512,63 +654,194 @@
     el.addEventListener('input', updatePreview);
   });
 
-  // --- Reusable folder-browser widget (used for both the footage source
-  // folder and the custom output location) ---
-  function initFolderBrowser(opts) {
-    const input = document.getElementById(opts.inputId);
-    const browseButton = document.getElementById(opts.browseButtonId);
-    const folderBrowser = document.getElementById(opts.folderBrowserId);
-    const folderBrowserPath = document.getElementById(opts.pathId);
-    const folderBrowserList = document.getElementById(opts.listId);
-    const useThisFolder = document.getElementById(opts.useHereId);
-    let currentPath = null;
-
-    function loadFolder(path) {
-      const qs = path ? ('?path=' + encodeURIComponent(path)) : '';
-      fetch('/browse' + qs)
+  // --- "Browse..." opens a native OS folder picker on the Glambot PC ---
+  Array.prototype.forEach.call(document.querySelectorAll('.pick-folder-btn'), function (btn) {
+    btn.addEventListener('click', function () {
+      var input = document.getElementById(btn.getAttribute('data-target'));
+      var body = new FormData();
+      body.append('kind', 'folder');
+      body.append('initial', (input.value || '').trim());
+      btn.disabled = true;
+      fetch('{{ url_for("pick") }}', { method: 'POST', body: body })
         .then(function (r) { return r.json(); })
         .then(function (data) {
-          currentPath = data.path;
-          folderBrowserPath.textContent = data.path;
-          folderBrowserList.innerHTML = '';
-          if (data.parent) {
-            const up = document.createElement('li');
-            up.textContent = '.. (up)';
-            up.addEventListener('click', function () { loadFolder(data.parent); });
-            folderBrowserList.appendChild(up);
+          if (data.ok) { input.value = data.path; }
+          else if (data.reason === 'unsupported') {
+            alert('The folder picker only works on the Glambot PC itself - type or paste the path here instead.');
+          } else if (data.reason && data.reason !== 'cancelled') {
+            alert(data.error || 'Could not open the folder picker.');
           }
-          data.folders.forEach(function (name) {
-            const li = document.createElement('li');
-            li.textContent = name;
-            li.addEventListener('click', function () {
-              loadFolder(data.path + (data.path.endsWith('/') ? '' : '/') + name);
-            });
-            folderBrowserList.appendChild(li);
-          });
-        });
-    }
-
-    browseButton.addEventListener('click', function () {
-      const isOpen = folderBrowser.classList.toggle('open');
-      if (isOpen) loadFolder(input.value || null);
+        })
+        .catch(function () { alert('Could not reach the server.'); })
+        .then(function () { btn.disabled = false; });
     });
-    useThisFolder.addEventListener('click', function () {
-      if (currentPath) input.value = currentPath;
-      folderBrowser.classList.remove('open');
-    });
-  }
-
-  initFolderBrowser({
-    inputId: 'source_dir', browseButtonId: 'browseButton', folderBrowserId: 'folderBrowser',
-    pathId: 'folderBrowserPath', listId: 'folderBrowserList', useHereId: 'useThisFolder',
-  });
-  initFolderBrowser({
-    inputId: 'output_dir', browseButtonId: 'browseButton2', folderBrowserId: 'folderBrowser2',
-    pathId: 'folderBrowserPath2', listId: 'folderBrowserList2', useHereId: 'useThisFolder2',
   });
 
   toggleVisibility();
   updatePreview();
+})();
+
+// --- Soundtrack: test the trimmed section, and delete from the library ---
+(function () {
+  var choice = document.getElementById('soundtrack_choice');
+  var fileInput = document.getElementById('soundtrack_file');
+  var trimStart = document.getElementById('soundtrack_trim_start');
+  var trimEnd = document.getElementById('soundtrack_trim_end');
+  var audio = document.getElementById('soundtrackAudio');
+  var testBtn = document.getElementById('soundtrackTest');
+  var stopBtn = document.getElementById('soundtrackStop');
+  var hint = document.getElementById('soundtrackTestHint');
+  var deleteRow = document.getElementById('soundtrackDeleteRow');
+  var deleteName = document.getElementById('soundtrackDeleteName');
+  var deletePw = document.getElementById('soundtrackDeletePw');
+  var deleteBtn = document.getElementById('soundtrackDeleteBtn');
+  if (!choice || !audio) return;
+
+  var objectUrl = null;
+  var stopAt = null;
+
+  function tsToSeconds(v) {
+    if (!v) return null;
+    v = String(v).trim();
+    if (!v) return null;
+    if (v.indexOf(':') !== -1) {
+      return v.split(':').reduce(function (acc, p) { return acc * 60 + (parseFloat(p) || 0); }, 0);
+    }
+    var n = parseFloat(v);
+    return isNaN(n) ? null : n;
+  }
+
+  function isLibraryTrack() {
+    return choice.value && choice.value !== '__none__' && choice.value !== '__upload__';
+  }
+
+  function clearObjectUrl() {
+    if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+  }
+
+  function stop() {
+    audio.pause();
+    stopBtn.classList.add('hidden');
+  }
+
+  function syncDeleteRow() {
+    if (isLibraryTrack()) {
+      deleteName.textContent = choice.value;
+      deleteRow.classList.remove('hidden');
+    } else {
+      deleteRow.classList.add('hidden');
+    }
+  }
+
+  testBtn.addEventListener('click', function () {
+    clearObjectUrl();
+    var src = null;
+    if (isLibraryTrack()) {
+      src = '/soundtracks/' + encodeURIComponent(choice.value);
+    } else if (choice.value === '__upload__' && fileInput.files && fileInput.files[0]) {
+      objectUrl = URL.createObjectURL(fileInput.files[0]);
+      src = objectUrl;
+    }
+    if (!src) { hint.textContent = 'Pick a library track or choose a file to upload first.'; return; }
+    hint.textContent = '';
+    var start = tsToSeconds(trimStart.value) || 0;
+    stopAt = tsToSeconds(trimEnd.value);
+    audio.src = src;
+    audio.currentTime = 0;
+    var begin = function () {
+      try { audio.currentTime = start; } catch (e) {}
+      audio.play().catch(function () { hint.textContent = 'Could not play that track.'; });
+      audio.removeEventListener('loadedmetadata', begin);
+    };
+    audio.addEventListener('loadedmetadata', begin);
+    audio.load();
+    stopBtn.classList.remove('hidden');
+  });
+
+  stopBtn.addEventListener('click', stop);
+  audio.addEventListener('timeupdate', function () {
+    if (stopAt != null && audio.currentTime >= stopAt) stop();
+  });
+  audio.addEventListener('ended', function () { stopBtn.classList.add('hidden'); clearObjectUrl(); });
+
+  choice.addEventListener('change', function () { stop(); clearObjectUrl(); syncDeleteRow(); });
+
+  deleteBtn.addEventListener('click', function () {
+    if (!isLibraryTrack()) return;
+    if (!deletePw.value) { hint.textContent = 'Enter the delete password.'; return; }
+    if (!window.confirm('Delete "' + choice.value + '" from the soundtrack library? This removes the file for every project.')) return;
+    var form = document.createElement('form');
+    form.method = 'post';
+    form.action = '/soundtracks/' + encodeURIComponent(choice.value) + '/delete';
+    var pw = document.createElement('input');
+    pw.type = 'hidden';
+    pw.name = 'password';
+    pw.value = deletePw.value;
+    form.appendChild(pw);
+    document.body.appendChild(form);
+    form.submit();
+  });
+
+  syncDeleteRow();
+})();
+
+// --- Basic / Advanced editing / Email template sub-tabs ---
+(function () {
+  var tabs = document.querySelectorAll('.form-tab[data-form-tab]');
+  var panels = document.querySelectorAll('.form-panel[data-form-panel]');
+  if (!tabs.length) return;
+  var previewCol = document.querySelector('.preview-col');
+  function show(name) {
+    tabs.forEach(function (t) { t.classList.toggle('active', t.dataset.formTab === name); });
+    panels.forEach(function (p) { p.classList.toggle('hidden', p.dataset.formPanel !== name); });
+    if (previewCol) previewCol.classList.toggle('hidden', name !== 'overlay');
+    try { localStorage.setItem('glambot-project-form-tab', name); } catch (e) {}
+  }
+  tabs.forEach(function (t) { t.addEventListener('click', function () { show(t.dataset.formTab); }); });
+  var saved = null;
+  try { saved = localStorage.getItem('glambot-project-form-tab'); } catch (e) {}
+  show(['overlay', 'soundtrack', 'advanced', 'email'].indexOf(saved) !== -1 ? saved : 'basic');
+})();
+
+// --- Email template: hide/show, clear, and confirm-before-save ---
+(function () {
+  var form = document.getElementById('projectForm');
+  var subject = document.getElementById('email_subject');
+  var body = document.getElementById('email_body');
+  var fields = document.getElementById('emailTemplateFields');
+  var toggle = document.getElementById('emailTemplateToggle');
+  var clearBtn = document.getElementById('emailTemplateClear');
+  var note = document.getElementById('emailTemplateNote');
+  if (!form || !subject || !body) return;
+
+  var initialSubject = subject.value, initialBody = body.value;
+
+  function renderHidden(hidden) {
+    fields.classList.toggle('hidden', hidden);
+    toggle.textContent = hidden ? 'Show fields' : 'Hide fields';
+  }
+  var startHidden = false;
+  try { startHidden = localStorage.getItem('glambot-email-tmpl-hidden') === 'yes'; } catch (e) {}
+  renderHidden(startHidden);
+  toggle.addEventListener('click', function () {
+    var hidden = !fields.classList.contains('hidden');
+    try { localStorage.setItem('glambot-email-tmpl-hidden', hidden ? 'yes' : 'no'); } catch (e) {}
+    renderHidden(hidden);
+  });
+
+  clearBtn.addEventListener('click', function () {
+    subject.value = '';
+    body.value = '';
+    note.style.display = '';
+  });
+
+  form.addEventListener('submit', function (ev) {
+    if (subject.value !== initialSubject || body.value !== initialBody) {
+      if (!window.confirm("Save the changes to this project's email template?")) {
+        ev.preventDefault();
+      }
+    }
+  });
 })();
 
 (function () {
@@ -583,5 +856,6 @@
   });
 })();
 </script>
+<script src="{{ url_for('static', filename='advanced_edit.js') }}"></script>
 </body>
 </html>

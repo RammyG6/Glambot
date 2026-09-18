@@ -91,25 +91,50 @@ def main() -> None:
 
     from glambot.app import create_app
     from glambot.db import JobStore
+    from glambot.ftp_import import FtpImportServer, load_ftp_settings
+    from glambot.phantom_import import PhantomImportServer, load_phantom_settings
     from glambot.processor import stop_all_active
     from glambot.watcher import InboxWatcher
 
     inbox_dir = Path(os.environ.get("INBOX_DIR", str(data_dir / "project"))).resolve()
     host = os.environ.get("HOST", "127.0.0.1")
+    # BIND_HOST is the listening socket; the window and readiness probe always
+    # use loopback (connecting to 0.0.0.0 is unreliable on Windows). Set
+    # BIND_HOST=0.0.0.0 in .env to also serve guests / iPads over the LAN.
+    bind_host = os.environ.get("BIND_HOST", host)
     port = int(os.environ.get("PORT", "5000"))
+
+    if bind_host not in {"127.0.0.1", "::1", "localhost"} and not os.environ.get("GLAMBOT_PIN", "").strip():
+        logging.warning(
+            "Glambot is binding to %s with no GLAMBOT_PIN set - the operator dashboard is "
+            "reachable by anyone on the LAN. Set GLAMBOT_PIN in .env.", bind_host,
+        )
 
     store = JobStore(inbox_dir / ".glambot" / "jobs.sqlite")
     watcher = InboxWatcher(inbox_dir, store)
     watcher.start()
-    app = create_app(inbox_dir, store, watcher)
+
+    ftp_server = FtpImportServer(inbox_dir, watcher)
+    if load_ftp_settings(inbox_dir).get("enabled"):
+        err = ftp_server.start()
+        if err:
+            logging.warning("FTP import server not started: %s", err)
+
+    phantom_server = PhantomImportServer(inbox_dir, watcher)
+    if load_phantom_settings(inbox_dir).get("enabled"):
+        err = phantom_server.start()
+        if err:
+            logging.warning("Phantom import not started: %s", err)
+
+    app = create_app(inbox_dir, store, watcher, ftp_server, phantom_server)
 
     server_thread = threading.Thread(
-        target=lambda: app.run(host=host, port=port, debug=False, use_reloader=False),
+        target=lambda: app.run(host=bind_host, port=port, debug=False, use_reloader=False),
         daemon=True,
     )
     server_thread.start()
 
-    url = f"http://{host}:{port}/"
+    url = f"http://127.0.0.1:{port}/"
     import urllib.request
     ready = False
     for _ in range(60):
@@ -125,15 +150,19 @@ def main() -> None:
             f"Check the log for details:\n{log_path}"
         )
 
-    _run_gui(url, watcher, log_path)
+    _run_gui(url, watcher, log_path, ftp_server, phantom_server)
 
 
-def _run_gui(url: str, watcher, log_path: Path) -> None:
+def _run_gui(url: str, watcher, log_path: Path, ftp_server=None, phantom_server=None) -> None:
     import webview
     import pystray
     from PIL import Image
 
     window = webview.create_window("Glambot", url, width=1400, height=900)
+
+    # Let the Flask "/pick" route raise native file dialogs on this window.
+    from glambot import nativeui
+    nativeui.register_webview_window(window)
 
     _shutting_down = threading.Event()
 
@@ -151,6 +180,16 @@ def _run_gui(url: str, watcher, log_path: Path) -> None:
             watcher.stop()
         except Exception:
             logging.exception("Error stopping watcher")
+        try:
+            if ftp_server is not None:
+                ftp_server.stop()
+        except Exception:
+            logging.exception("Error stopping FTP import server")
+        try:
+            if phantom_server is not None:
+                phantom_server.stop()
+        except Exception:
+            logging.exception("Error stopping Phantom import")
         try:
             tray_icon.stop()
         except Exception:

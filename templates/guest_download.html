@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Your video</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  body { padding: 1.5rem 1.25rem 3rem; }
+  .guest-video { width: 100%; border-radius: var(--radius); background: #000; display: block; margin: 1rem 0; }
+  .btn-download { margin: 1rem 0; }
+  .pin-input { text-align: center; letter-spacing: .3em; font-size: var(--fs-xl); }
+  .muted { color: var(--text-secondary); font-size: var(--fs-base); }
+</style>
+</head>
+<body class="page-narrow">
+{% if locked %}
+  <h1>Enter the PIN</h1>
+  <p class="muted">It's printed on the card with the QR code.</p>
+  {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+  <form method="post" action="{{ url_for('guest.unlock', token=token) }}">
+    <input class="pin-input" type="password" name="pin" inputmode="numeric" autocomplete="off" autofocus required>
+    <button type="submit" class="btn btn-primary btn-lg btn-block btn-download">Unlock</button>
+  </form>
+{% else %}
+  <h1>{{ job.filename }}</h1>
+  <video class="guest-video" controls playsinline preload="metadata" src="{{ url_for('guest.download_stream', token=token) }}"></video>
+  <a class="btn btn-primary btn-lg btn-block btn-download" href="{{ url_for('guest.download_file', token=token) }}">Download video</a>
+  <p class="muted dl-status" id="dlStatus" hidden></p>
+  <p><a href="{{ url_for('guest.gallery', project=job.project) }}">See all videos from this event &rarr;</a></p>
+  <script>
+  (function () {
+    var base = {{ downloads | default(0) }};
+    var el = document.getElementById('dlStatus');
+    var every = 3000;
+    document.querySelector('.btn-download').addEventListener('click', function () { every = 1500; });
+    function show(n) {
+      if (n > base) {
+        el.textContent = '✓ Download Complete' + (n > 1 ? ' (' + n + ')' : '');
+        el.hidden = false;
+      }
+    }
+    (function loop() {
+      fetch('{{ url_for("guest.download_status", token=token) }}', { cache: 'no-store' })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { show(d.downloads); })
+        .catch(function () {})
+        .finally(function () { setTimeout(loop, every); });
+    })();
+  })();
+  </script>
+{% endif %}
+</body>
+</html>

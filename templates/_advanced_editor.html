@@ -1,0 +1,92 @@
+{# Shared advanced-editing controls: exposure / contrast / white-balance
+   sliders + the draggable speed-ramp curve editor. Rendered on the project
+   settings form (context='project') and per-clip on review cards
+   (context='clip', where the ramp editor sits inside a nested <details>).
+
+   Field NAMES are fixed (exposure, contrast, white_balance,
+   speed_ramp_enabled, speed_ramp_interpolation, speed_ramp_smooth_frames,
+   speed_ramp_max_speed, speed_ramp_max_speed_custom, speed_ramp_json) so
+   _parse_advanced_fields() reads any form that includes this macro. Behaviour
+   is wired by static/advanced_edit.js, scoped to the [data-adv-root] element -
+   no ids, so multiple instances coexist on one page. `values` supplies
+   prefill (exposure/contrast/white_balance/speed_ramp_enabled/
+   speed_ramp_json, and in clip context adv_project_json). #}
+{% macro advanced_editor(values, context='clip') %}
+<div class="adv-editor" data-adv-root
+     {% if context == 'clip' %}data-adv-project='{{ values.get("adv_project_json", "") }}'{% endif %}>
+  <div class="adv-grade">
+    <label>Exposure &mdash; <span class="adv-val">{{ values.get('exposure', 0) }}</span> stops
+      <input type="range" name="exposure" min="-5" max="5" step="0.05" data-default="0" value="{{ values.get('exposure', 0) }}"></label>
+    <button type="button" class="adv-reset" data-reset="exposure">Reset</button>
+    <label>Contrast &mdash; <span class="adv-val">{{ values.get('contrast', 1) }}</span>&times;
+      <input type="range" name="contrast" min="0.5" max="2" step="0.05" data-default="1" value="{{ values.get('contrast', 1) }}"></label>
+    <button type="button" class="adv-reset" data-reset="contrast">Reset</button>
+    <label>Saturation &mdash; <span class="adv-val">{{ values.get('saturation', 1) }}</span>&times;
+      <input type="range" name="saturation" min="0" max="2" step="0.05" data-default="1" value="{{ values.get('saturation', 1) }}"></label>
+    <button type="button" class="adv-reset" data-reset="saturation">Reset</button>
+    <label>White balance &mdash; <span class="adv-val">{{ values.get('white_balance', 0) }}</span> (&minus; warm / + cool)
+      <input type="range" name="white_balance" min="-100" max="100" step="1" data-default="0" value="{{ values.get('white_balance', 0) }}"></label>
+    <button type="button" class="adv-reset" data-reset="white_balance">Reset</button>
+    {% if context == 'project' %}
+      <p class="hint">Applied to every clip this project renders. Use the per-clip controls on a review card to tweak a single clip.</p>
+    {% endif %}
+  </div>
+
+  {% if context == 'clip' %}<details class="adv-ramp-details">
+    <summary>Speed ramp for this clip</summary>{% endif %}
+    <label class="checkbox-label">
+      <input type="checkbox" name="speed_ramp_enabled" class="adv-ramp-enable"
+             {% if values.get('speed_ramp_enabled') == 'on' %}checked{% endif %}>
+      {{ 'Ramp this clip along a custom curve' if context == 'clip' else 'Enable speed ramping' }}
+    </label>
+    <p class="hint">Retimes the clip along a curve &mdash; fast in, slow-motion through the middle, fast out. Drag the points; drag a point's tangent handles to shape the transition; double-click the track to add a point, double-click a point to remove it. Original audio is dropped on ramped clips.</p>
+    <div class="adv-ramp-editor hidden">
+      <canvas class="adv-ramp-canvas" width="520" height="240"
+              style="width:100%;max-width:520px;background:var(--bg-elevated-2);border-radius:var(--radius-sm);touch-action:none"></canvas>
+      <div class="adv-ramp-curve-actions">
+        <button type="button" class="adv-reset" data-reset="curve">Reset curve</button>
+      </div>
+      <div class="row">
+        <div>
+          <label>Curve
+            <select name="speed_ramp_interpolation" data-default="smooth">
+              <option value="smooth">Smooth (bezier handles)</option>
+              <option value="linear">Linear (straight segments)</option>
+            </select></label>
+          <button type="button" class="adv-reset" data-reset="speed_ramp_interpolation">Reset</button>
+        </div>
+        <div>
+          <label>Max speed
+            <select name="speed_ramp_max_speed" class="adv-ramp-maxspeed" data-default="40">
+              <option value="2">2&times;</option>
+              <option value="4">4&times;</option>
+              <option value="8">8&times;</option>
+              <option value="40" selected>40&times;</option>
+              <option value="custom">Custom&hellip;</option>
+            </select></label>
+          <button type="button" class="adv-reset" data-reset="speed_ramp_max_speed">Reset</button>
+          <label class="adv-ramp-maxspeed-custom hidden">Custom max speed (&times;)
+            <input type="number" name="speed_ramp_max_speed_custom"
+                   min="2" max="1000" step="1" placeholder="e.g. 120"></label>
+        </div>
+        <div>
+          <label class="checkbox-label" style="margin-top:1.8rem">
+            <input type="checkbox" name="speed_ramp_smooth_frames" data-default=""> Interpolate frames (slower render)
+          </label>
+        </div>
+        <div>
+          <label>Trimmed clip length (sec)
+            <input type="number" class="adv-ramp-duration" min="0.5" step="0.5" placeholder="10"></label>
+        </div>
+      </div>
+      <p class="hint">The graph's horizontal axis is % of the clip <em>after</em> any trim in Basic settings. The clip length only adds a seconds readout to the axis &mdash; it isn't saved, and fills in automatically after you render a preview.</p>
+      <input type="hidden" name="speed_ramp_json" class="adv-ramp-json" value="{{ values.get('speed_ramp_json', '') }}">
+    </div>
+  {% if context == 'clip' %}</details>{% endif %}
+
+  <div class="adv-reset-all">
+    <button type="button" data-reset-all="neutral">Reset all to default</button>
+    {% if context == 'clip' %}<button type="button" data-reset-all="project">Match project settings</button>{% endif %}
+  </div>
+</div>
+{% endmacro %}

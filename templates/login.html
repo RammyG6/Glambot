@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glambot — Sign in</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+  .login-card { width: 100%; max-width: 340px; text-align: center; }
+  .login-card .brand-mark { margin: 0 auto 1.25rem; width: 48px; height: 48px; border-radius: 12px;
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #5e5ce6));
+    display: flex; align-items: center; justify-content: center; color: #fff; }
+  .login-card .brand-mark svg { width: 24px; height: 24px; }
+  .login-card h1 { font-size: var(--fs-2xl); margin: 0 0 1.5rem; }
+  .login-card input[type="password"] { text-align: center; letter-spacing: .3em; font-size: var(--fs-xl); }
+  .login-card .btn { width: 100%; margin-top: 1rem; }
+</style>
+</head>
+<body class="page-full">
+<div class="login-wrap">
+  <form class="login-card" method="post" action="{{ url_for('auth.login') }}">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10l5-3v10l-5-3M4 6h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"/></svg>
+    </div>
+    <h1>Enter the Glambot PIN</h1>
+    {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+    <input type="password" name="pin" inputmode="numeric" autocomplete="off" autofocus required>
+    <input type="hidden" name="next" value="{{ next }}">
+    <button type="submit" class="btn btn-primary btn-lg">Sign in</button>
+  </form>
+</div>
+</body>
+</html>

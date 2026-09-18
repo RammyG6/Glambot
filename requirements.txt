@@ -6,3 +6,4 @@ google-auth==2.34.0
 google-auth-oauthlib==1.2.1
 python-dotenv==1.0.1
 imageio-ffmpeg==0.5.1
+pyftpdlib==1.5.10

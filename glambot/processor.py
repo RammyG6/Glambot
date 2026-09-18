@@ -16,6 +16,13 @@ from .config import (
     FOOTAGE_SUBDIR,
     THUMBNAIL_SUBDIR,
     ProjectConfig,
+    managed_subdir_in,
+)
+from .effects import (
+    build_cine_source_filter,
+    build_grade_filter,
+    build_speed_ramp_filtergraph,
+    expected_ramp_duration,
 )
 from .db import Job, JobStore
 from .drive import DriveError, upload_and_share
@@ -52,14 +59,26 @@ def resolve_output_base(project_dir: Path, config: ProjectConfig) -> Path:
     return project_dir
 
 
+def _overlay_spec_for(config: ProjectConfig, width: int, height: int) -> OverlaySpec:
+    """Pick the overlay whose orientation matches this output: taller-than-wide
+    -> the vertical overlay, otherwise the horizontal one. Both fall back to a
+    legacy single overlay in load_config, so this is safe for old configs."""
+    if height > width:
+        return OverlaySpec(config.vertical_overlay, config.vertical_overlay_position,
+                           config.vertical_overlay_scale, config.vertical_overlay_x,
+                           config.vertical_overlay_y)
+    return OverlaySpec(config.horizontal_overlay, config.horizontal_overlay_position,
+                       config.horizontal_overlay_scale, config.horizontal_overlay_x,
+                       config.horizontal_overlay_y)
+
+
 def _primary_overlay_spec(config: ProjectConfig) -> OverlaySpec:
-    return OverlaySpec(config.overlay, config.overlay_position, config.overlay_scale,
-                       config.overlay_x, config.overlay_y)
+    return _overlay_spec_for(config, config.width, config.height)
 
 
 def _second_overlay_spec(config: ProjectConfig) -> OverlaySpec:
-    return OverlaySpec(config.second_overlay, config.second_overlay_position,
-                       config.second_overlay_scale, config.second_overlay_x, config.second_overlay_y)
+    return _overlay_spec_for(config, config.second_width or config.width,
+                             config.second_height or config.height)
 
 # .mxf (Sony), .cine (Phantom high-speed), .braw (Blackmagic RAW) are accepted
 # here, but stock ffmpeg can only demux .mxf out of the box - .cine/.braw
@@ -184,6 +203,17 @@ def _cleanup_partial(path: Path | None) -> None:
         pass
 
 
+def _cleanup_filtergraph(output_path: Path | None) -> None:
+    """Remove the sidecar filtergraph file build_ffmpeg_cmd may have written
+    for a very long speed-ramp expression."""
+    if output_path is None:
+        return
+    try:
+        output_path.with_suffix(output_path.suffix + ".filtergraph").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _resolve_ffmpeg() -> str | None:
     """Prefer a system ffmpeg on PATH; otherwise fall back to the static
     binary bundled by the imageio-ffmpeg package — works identically on
@@ -222,11 +252,17 @@ def _has_audio_stream(path: Path) -> bool:
 
 
 def _overlay_filter(w: int, h: int, rotation: int, position_x: int, position_y: int,
-                     spec: OverlaySpec, overlay_index: int | None) -> str:
+                     spec: OverlaySpec, overlay_index: int | None,
+                     src_label: str = "[0:v]", grade_filter: str = "") -> str:
     """Return the filter_complex video fragment: rotate/pan the source, scale/
-    crop to WxH, then (if `spec.path`) composite the overlay from input
-    `overlay_index`. Ends in output pad [v]."""
+    crop to WxH, apply the optional colour grade, then (if `spec.path`)
+    composite the overlay from input `overlay_index`. Ends in output pad [v].
+
+    `src_label` is the input pad to read from - `[0:v]` normally, or the output
+    of the speed-ramp fragment when one is active.
+    """
     rotate = _ROTATION_FILTERS[rotation]
+    grade_suffix = f",{grade_filter}" if grade_filter else ""
     # Pan the center-crop window by position_x/position_y (pixels) instead of
     # always cropping dead-center; min(max(...)) clamps the offset so it can
     # never push the crop window outside the actual (per-source, unknown
@@ -236,8 +272,8 @@ def _overlay_filter(w: int, h: int, rotation: int, position_x: int, position_y: 
     x_expr = f"'min(max(0,(in_w-out_w)/2+({position_x})),in_w-out_w)'"
     y_expr = f"'min(max(0,(in_h-out_h)/2+({position_y})),in_h-out_h)'"
     bg_chain = (
-        f"[0:v]{rotate}scale={w}:{h}:force_original_aspect_ratio=increase,"
-        f"crop={w}:{h}:{x_expr}:{y_expr},setsar=1"
+        f"{src_label}{rotate}scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h}:{x_expr}:{y_expr},setsar=1{grade_suffix}"
     )
 
     if not spec.path or overlay_index is None:
@@ -287,19 +323,35 @@ def _overlay_filter(w: int, h: int, rotation: int, position_x: int, position_y: 
 def build_ffmpeg_cmd(input_path: Path, output_path: Path, config: ProjectConfig,
                       trim_start: str | None, trim_end: str | None, ffmpeg_bin: str = "ffmpeg",
                       width: int | None = None, height: int | None = None,
-                      bitrate: str | None = None, overlay_spec: OverlaySpec | None = None) -> list[str]:
+                      bitrate: str | None = None, overlay_spec: OverlaySpec | None = None,
+                      grade=None, speed_ramp=None, src_duration: float | None = None,
+                      source_fps: float | None = None) -> list[str]:
     w = width if width is not None else config.width
     h = height if height is not None else config.height
     bitrate = bitrate if bitrate is not None else config.bitrate
     if overlay_spec is None:
         overlay_spec = _primary_overlay_spec(config)
 
+    def _fps_str(v):
+        return str(int(v)) if float(v) == int(v) else f"{float(v):g}"
+
     cmd = [ffmpeg_bin, "-y"]
+    # Reinterpret raw footage at the wanted playback rate (a Phantom .cine's
+    # header stores its high-speed capture rate). Must precede -i.
+    if source_fps:
+        cmd += ["-r", _fps_str(source_fps)]
     if trim_start:
         cmd += ["-ss", trim_start]
     if trim_end:
         cmd += ["-to", trim_end]
     cmd += ["-i", str(input_path)]
+
+    # Raw Phantom .cine: reproduce the camera's own colour before anything else
+    # touches the picture (so the speed ramp + grade see real colour).
+    cine_fix = ""
+    if input_path.suffix.lower() == ".cine":
+        cine_fix = build_cine_source_filter(input_path, _FFPROBE,
+                                            profile=config.color_profile)
 
     # Input indices are assigned dynamically: [0]=video always; the overlay
     # (if any) is [1]; the soundtrack (if any) is whatever comes next.
@@ -310,10 +362,36 @@ def build_ffmpeg_cmd(input_path: Path, output_path: Path, config: ProjectConfig,
         overlay_index = next_index
         next_index += 1
 
+    grade_filter = build_grade_filter(grade, ffmpeg_bin)
+
+    video_in = "[0:v]"
+    pre_fragment = ""
+    if cine_fix:
+        pre_fragment = f"[0:v]{cine_fix}[cv]"
+        video_in = "[cv]"
+
+    # Speed ramp: retime the source along the curve first, then feed the result
+    # into the normal scale/crop/grade/overlay chain. Original audio is dropped
+    # on a ramped clip (only the soundtrack, at normal speed, survives).
+    ramp_fragment = ""
+    src_label = video_in
+    ramped = False
+    if speed_ramp is not None:
+        if src_duration is None:
+            src_duration = _effective_duration(input_path, trim_start, trim_end, source_fps)
+        ramp_fragment, src_label, _ = build_speed_ramp_filtergraph(speed_ramp, video_in, src_duration)
+        ramped = bool(ramp_fragment)
+
     filter_complex = _overlay_filter(w, h, config.rotation, config.position_x, config.position_y,
-                                     overlay_spec, overlay_index)
+                                     overlay_spec, overlay_index, src_label=src_label,
+                                     grade_filter=grade_filter)
+    if ramp_fragment:
+        filter_complex = f"{ramp_fragment};{filter_complex}"
+    if pre_fragment:
+        filter_complex = f"{pre_fragment};{filter_complex}"
 
     audio_mapped = False
+    audio_none = False
     if config.soundtrack:
         if config.soundtrack_trim and config.soundtrack_trim.start:
             cmd += ["-ss", config.soundtrack_trim.start]
@@ -322,7 +400,7 @@ def build_ffmpeg_cmd(input_path: Path, output_path: Path, config: ProjectConfig,
         cmd += ["-i", config.soundtrack]
         snd_index = next_index
 
-        if _has_audio_stream(input_path):
+        if not ramped and _has_audio_stream(input_path):
             filter_complex += (
                 f";[0:a]volume={config.original_volume_db}dB[origa]"
                 f";[{snd_index}:a]volume={config.soundtrack_volume_db}dB[snda]"
@@ -331,24 +409,46 @@ def build_ffmpeg_cmd(input_path: Path, output_path: Path, config: ProjectConfig,
         else:
             filter_complex += f";[{snd_index}:a]volume={config.soundtrack_volume_db}dB[a]"
         audio_mapped = True
+    elif ramped:
+        # Ramped, no soundtrack - there is no sensible audio to keep.
+        audio_none = True
 
-    cmd += ["-filter_complex", filter_complex, "-map", "[v]"]
-    cmd += ["-map", "[a]"] if audio_mapped else ["-map", "0:a?"]
+    # A long speed-ramp setpts expression can blow the OS command-line limit;
+    # hand it to ffmpeg as a sidecar file instead. Cleaned up by the caller.
+    if len(filter_complex) > 7000:
+        script_path = output_path.with_suffix(output_path.suffix + ".filtergraph")
+        script_path.write_text(filter_complex, encoding="utf-8")
+        cmd += ["-filter_complex_script", str(script_path)]
+    else:
+        cmd += ["-filter_complex", filter_complex]
+    cmd += ["-map", "[v]"]
+    if audio_mapped:
+        cmd += ["-map", "[a]"]
+    elif audio_none:
+        cmd += ["-an"]
+    else:
+        cmd += ["-map", "0:a?"]
 
     # Network/streaming-preferred output: yuv420p + a broadly-decodable
     # profile/level plus a regular closed GOP reduce the re-encoding work
     # Google Drive's backend has to do before a clip is smoothly previewable.
     # Level 5.1 (rather than the more commonly cited 4.1) is needed because
     # this app's presets go up to 3840x2160 at 60fps, which 4.1 doesn't cover.
-    effective_fps = config.fps or _probe_fps(input_path) or 30
+    out_fps = config.fps or source_fps
+    effective_fps = out_fps or _probe_fps(input_path) or 30
     gop = max(1, round(2 * effective_fps))
     cmd += [
         "-c:v", "libx264", "-profile:v", "high", "-level", "5.1", "-pix_fmt", "yuv420p",
         "-b:v", bitrate, "-preset", "medium",
         "-g", str(gop), "-keyint_min", str(gop), "-sc_threshold", "0",
     ]
-    if config.fps is not None:
-        cmd += ["-r", str(config.fps)]
+    if cine_fix:
+        # A raw .cine carries no colour signalling; tag the output like the
+        # working MXF path does so players don't guess.
+        cmd += ["-color_primaries", "bt709", "-color_trc", "bt709",
+                "-colorspace", "bt709", "-color_range", "tv"]
+    if out_fps is not None:
+        cmd += ["-r", _fps_str(out_fps)]
     cmd += [
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
@@ -368,6 +468,36 @@ def _probe_duration(path: Path) -> float | None:
         return float(result.stdout.strip())
     except (FileNotFoundError, ValueError, subprocess.SubprocessError):
         return None
+
+
+# Footage whose reported frame rate is above this is treated as high-speed
+# capture (a Phantom .cine, phone slo-mo, ...) and played back at the default
+# rate unless the project sets its own "Source frame rate".
+_HIGH_SPEED_FPS = 60.0
+_DEFAULT_PLAYBACK_FPS = float(os.environ.get("GLAMBOT_DEFAULT_PLAYBACK_FPS", "25") or 25)
+
+
+def _effective_source_fps(path: Path, configured: float | None) -> float | None:
+    """The rate to reinterpret the source at: the project's explicit setting,
+    else the default playback rate for footage that reports a high capture
+    rate, else None (trust the file)."""
+    if configured:
+        return float(configured)
+    rate = _probe_fps(path)
+    return _DEFAULT_PLAYBACK_FPS if (rate and rate > _HIGH_SPEED_FPS) else None
+
+
+def _source_duration(path: Path, source_fps: float | None) -> float | None:
+    """The clip's true length. When `source_fps` is set (raw footage whose
+    header lies about its rate - a Phantom .cine reports its capture rate) the
+    container duration is wrong, so scale it: reported * reported_fps / wanted."""
+    reported = _probe_duration(path)
+    if not source_fps or source_fps <= 0 or reported is None:
+        return reported
+    rfps = _probe_fps(path)
+    if not rfps:
+        return reported
+    return reported * rfps / source_fps
 
 
 def _probe_fps(path: Path) -> float | None:
@@ -407,15 +537,17 @@ def _timestamp_to_seconds(value: str | None) -> float | None:
         return None
 
 
-def _effective_duration(source_path: Path, trim_start: str | None, trim_end: str | None) -> float | None:
-    """How many seconds of output this render will produce, for progress %.
-    Best-effort — returns None if it can't be determined (bar goes
-    indeterminate)."""
+def _effective_duration(source_path: Path, trim_start: str | None, trim_end: str | None,
+                        source_fps: float | None = None) -> float | None:
+    """How many seconds of source this render will consume, for progress % and
+    the speed-ramp timeline. Best-effort — returns None if it can't be
+    determined (bar goes indeterminate). Trim timestamps are in the same
+    (possibly reinterpreted, see `source_fps`) timeline as `-ss`/`-to`."""
     start = _timestamp_to_seconds(trim_start)
     end = _timestamp_to_seconds(trim_end)
     if start is not None and end is not None:
         return max(0.01, end - start)
-    source_dur = _probe_duration(source_path)
+    source_dur = _source_duration(source_path, source_fps)
     if source_dur is None:
         return None
     if end is not None:
@@ -552,12 +684,40 @@ def verify_output(output_path: Path, expected_duration: float | None) -> tuple[b
     return True, ""
 
 
+def _resolve_source(job, config: ProjectConfig) -> Path:
+    """Where this job's source footage actually is right now. After a
+    successful render the original is moved into Footage/, but the DB keeps the
+    original import path - so a Re-render / per-clip override falls back to the
+    archived copy. `_archive_original` archives next to the *import* folder;
+    older/default-output projects archive next to the output base - check both."""
+    p = Path(job.source_path)
+    if p.exists():
+        return p
+    name = Path(job.filename).name
+    project_dir = (config.project_dir or p.parent).resolve()
+    for archived in (p.parent / FOOTAGE_SUBDIR / name,
+                     resolve_output_base(project_dir, config) / FOOTAGE_SUBDIR / name):
+        if archived.exists():
+            return archived
+    return p
+
+
+def source_available(job, config: ProjectConfig) -> bool:
+    """True if _resolve_source() would find a real file to re-render from -
+    the eligibility the Re-render button / route should use so they agree with
+    what process_job can actually do."""
+    return _resolve_source(job, config).exists()
+
+
 def _archive_original(source_path: Path) -> None:
     """Move a processed original out of its import folder into the
     "Footage" subfolder (excluded from watching), alongside the rendered
     output. Best-effort — a failed move must never fail the job."""
     try:
         if not source_path.exists():
+            return
+        if managed_subdir_in(source_path):
+            # Already archived (e.g. this was a re-render from Footage/).
             return
         archive_dir = source_path.parent / FOOTAGE_SUBDIR
         archive_dir.mkdir(parents=True, exist_ok=True)
@@ -566,8 +726,28 @@ def _archive_original(source_path: Path) -> None:
             dest = archive_dir / f"{source_path.stem}_{uuid4().hex[:8]}{source_path.suffix}"
         shutil.move(str(source_path), str(dest))
         logger.info("Archived original %s -> %s", source_path, dest)
+        _archive_look_sidecar(source_path, dest)
     except Exception:
         logger.warning("Could not archive original %s", source_path, exc_info=True)
+
+
+def _archive_look_sidecar(source_path: Path, dest: Path) -> None:
+    """Take the clip's colour sidecar with it.
+
+    `load_cine_look` looks for `<clip>.look.json` *beside the clip*, so leaving
+    the sidecar behind silently downgrades every later render of the archived
+    original to the legacy wbgain+gamma fallback - a re-render would not match
+    the render it was repeating. Renamed to match `dest`, which may have gained
+    a uuid suffix to avoid a collision."""
+    from .effects import LOOK_SUFFIX
+    side = Path(str(source_path.with_suffix("")) + LOOK_SUFFIX)
+    if not side.exists():
+        return
+    try:
+        shutil.move(str(side), str(Path(str(dest.with_suffix("")) + LOOK_SUFFIX)))
+    except OSError:
+        logger.warning("Could not archive the colour sidecar for %s", source_path.name,
+                       exc_info=True)
 
 
 _FFMPEG_MISSING_MESSAGE = (
@@ -583,7 +763,7 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
         store.mark_error(job.id, _FFMPEG_MISSING_MESSAGE)
         return
 
-    source_path = Path(job.source_path)
+    source_path = _resolve_source(job, config)
     project_dir = (config.project_dir or source_path.parent).resolve()
     output_base = resolve_output_base(project_dir, config)
     footage_dir = output_base / FOOTAGE_SUBDIR
@@ -600,7 +780,21 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
     output_path = (footage_dir / (source_path.stem + ".mp4")).resolve()
 
     trim = config.trim_for(job.filename)
-    duration = _effective_duration(source_path, trim.start, trim.end)
+    grade = config.grade_for(job.filename)
+    ramp = config.speed_ramp_for(job.filename)
+    eff_src_fps = _effective_source_fps(source_path, config.source_fps)
+    if eff_src_fps and not config.source_fps:
+        logger.info(
+            "Job %s: %s reports a high capture rate; playing it back at %s fps "
+            "(set the project's Source frame rate to override)",
+            job.id, source_path.name, eff_src_fps,
+        )
+    src_duration = _effective_duration(source_path, trim.start, trim.end, eff_src_fps)
+    # Progress + integrity checks measure the OUTPUT, which a speed ramp makes
+    # shorter/longer than the source.
+    duration = src_duration
+    if ramp is not None and src_duration:
+        duration = expected_ramp_duration(ramp, src_duration)
     # One bar spanning every render pass: pass p of n fills the bar from
     # p/n to (p+1)/n as that pass runs.
     num_passes = 2 if config.second_resolution else 1
@@ -612,7 +806,9 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
 
     store.set_progress(job.id, 0)
     cmd = build_ffmpeg_cmd(source_path, output_path, config, trim.start, trim.end, ffmpeg_bin=ffmpeg_bin,
-                           overlay_spec=_primary_overlay_spec(config))
+                           overlay_spec=_primary_overlay_spec(config),
+                           grade=grade, speed_ramp=ramp, src_duration=src_duration,
+                           source_fps=eff_src_fps)
     logger.info("Processing job %s: %s", job.id, " ".join(cmd))
 
     try:
@@ -620,6 +816,8 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
     except FileNotFoundError:
         store.mark_error(job.id, _FFMPEG_MISSING_MESSAGE)
         return
+    finally:
+        _cleanup_filtergraph(output_path)
 
     if returncode != 0:
         if _pop_cancelled(job.id):
@@ -649,6 +847,8 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
             width=config.second_width, height=config.second_height,
             bitrate=config.second_bitrate or config.bitrate,
             overlay_spec=_second_overlay_spec(config),
+            grade=grade, speed_ramp=ramp, src_duration=src_duration,
+            source_fps=eff_src_fps,
         )
         logger.info("Processing job %s (second resolution): %s", job.id, " ".join(second_cmd))
         try:
@@ -657,6 +857,8 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
             )
         except FileNotFoundError:
             second_returncode, second_tail = 1, "ffmpeg not found"
+        finally:
+            _cleanup_filtergraph(secondary_output_path)
         if second_returncode != 0:
             if _pop_cancelled(job.id):
                 # Stopping mid-second-pass aborts the whole job, not just
@@ -699,7 +901,7 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
 
     job = store.get_job(job.id)
 
-    if config.delivery_mode == "qr_only" and not config.auto_deliver:
+    if config.delivery_mode == "qr_only" and not config.auto_deliver and not config.offline_mode:
         # Upload to Drive right away so the download link is already sitting
         # there by the time an operator clicks Approve at a live event — no
         # upload wait in front of the client. A failure here is non-fatal:
@@ -724,6 +926,9 @@ def process_job(job: Job, config: ProjectConfig, store: JobStore) -> None:
         subject, body = "", ""
         try:
             raw_subject, raw_body = load_default_template()
+            # Project's own template overrides the global default.
+            raw_subject = config.email_subject or raw_subject
+            raw_body = config.email_body or raw_body
             subject = resolve_placeholders(raw_subject, link="{link}", project=job.project, filename=job.filename)
             body = resolve_placeholders(raw_body, link="{link}", project=job.project, filename=job.filename)
         except Exception:

@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import shutil
 import sys
 import threading
@@ -27,6 +28,7 @@ from werkzeug.utils import secure_filename
 from .config import (
     AUDIO_EXTENSIONS,
     EMAIL_RE,
+    VALID_COLOR_PROFILES,
     ConfigError,
     extract_drive_folder_id,
     load_config,
@@ -38,8 +40,21 @@ from .delivery import DeliveryError, deliver
 from .drive import DriveError
 from .emailer import EmailError, load_default_template, resolve_placeholders, send_delivery_email
 from .folders import all_project_dirs, group_by_folder, project_watch_dirs
-from .processor import cancel_job, is_footage_file
-from .qr import make_qr_data_uri
+from .ftp_import import load_ftp_settings, parse_passive_ports, save_ftp_settings
+from .phantom_import import load_phantom_settings, save_phantom_settings
+
+# The save formats the camera bridge accepts, matching the page's dropdown.
+PHANTOM_FILE_TYPES = ("SVV_RAWCINE", "SVV_CINE", "SVV_TIFCINE")
+
+
+def _phantom_file_type(value: str | None) -> str:
+    """Fall back to the raw packed cine for anything unrecognised - it is both
+    the fastest off the camera and the format the grade pipeline expects."""
+    chosen = (value or "").strip().upper()
+    return chosen if chosen in PHANTOM_FILE_TYPES else "SVV_RAWCINE"
+from . import lan, nativeui
+from .processor import cancel_job, content_hash, is_footage_file
+from .qr import make_qr_data_uri, make_wifi_qr_data_uri
 from .watcher import InboxWatcher
 
 logger = logging.getLogger(__name__)
@@ -80,16 +95,56 @@ _REPO_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", Fal
 _SOUNDTRACKS_DIR = Path.cwd() / "soundtracks"
 _BACKGROUNDS_DIR = Path.cwd() / "backgrounds"
 
+# size -> PNG bytes, rendered once from logo/glambotlogo.png for the PWA icon.
+_ICON_CACHE: dict[int, bytes] = {}
 
-def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask:
+# Short, disposable low-res clips from the Advanced-editing "Render preview".
+_PREVIEW_DIR = Path.cwd() / ".glambot" / "preview"
+
+
+def _cleanup_previews() -> None:
+    """Keep the preview folder small: drop files older than an hour, then keep
+    only the newest few."""
+    try:
+        files = sorted(_PREVIEW_DIR.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    import time as _time
+    cutoff = _time.time() - 3600
+    for i, p in enumerate(files):
+        try:
+            if i >= 5 or p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _resolve_output_footage(project_dir: Path) -> Path | None:
+    try:
+        from .processor import resolve_output_base
+        return resolve_output_base(project_dir, load_config(project_dir)) / "Footage"
+    except ConfigError:
+        return None
+
+
+def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher, ftp_server=None,
+               phantom_server=None) -> Flask:
     app = Flask(
         __name__,
         template_folder=str(_REPO_ROOT / "templates"),
         static_folder=str(_REPO_ROOT / "static"),
     )
-    app.secret_key = os.environ.get("FLASK_SECRET", "glambot-local-dev")
+    app.secret_key = _resolve_secret(Path(inbox_dir))
     app.config["INBOX_DIR"] = Path(inbox_dir)
     app.config["STORE"] = store
+    app.config["FTP_SERVER"] = ftp_server
+    app.config["PHANTOM_SERVER"] = phantom_server
+
+    from .auth import init_auth
+    init_auth(app)
+
+    from .guest import guest_bp
+    app.register_blueprint(guest_bp)
 
     @app.template_filter("mmss")
     def _mmss(seconds):
@@ -103,32 +158,61 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
     @app.get("/")
     def index():
         inbox_dir = app.config["INBOX_DIR"]
-        # Re-render is only offerable while the original is still on disk.
-        # process_job() skips archiving whenever its integrity check fails,
-        # so that's exactly the case these buttons are for.
+        # Re-render is offerable whenever the source can still be found - either
+        # in its import folder (a failed render never archives it) or in the
+        # Footage/ archive next to a successful one. Mirror what process_job's
+        # _resolve_source() can actually do so the button and the route agree.
+        from .processor import source_available
+        _rr_cfg: dict[str, object] = {}
+
+        def _can_rerender(j):
+            try:
+                cfg = _rr_cfg.get(j.project) or _rr_cfg.setdefault(
+                    j.project, load_config(inbox_dir / j.project))
+                return source_available(j, cfg)
+            except ConfigError:
+                return bool(j.source_path) and Path(j.source_path).exists()
+
         error_jobs = [
             {"id": j.id, "project": j.project, "filename": j.filename, "error": j.error,
-             "can_rerender": bool(j.source_path) and Path(j.source_path).exists()}
+             "can_rerender": _can_rerender(j)}
             for j in store.list_jobs(status="error")
         ]
         sent_jobs = store.list_jobs(status="sent")[:20]
-        sent_cards = [{"job": j, "render_seconds": _render_seconds(j)} for j in sent_jobs]
+        _sent_cfg_cache: dict[str, object] = {}
+
+        def _sent_cfg(project: str):
+            if project not in _sent_cfg_cache:
+                try:
+                    _sent_cfg_cache[project] = load_config(inbox_dir / project)
+                except ConfigError:
+                    _sent_cfg_cache[project] = None
+            return _sent_cfg_cache[project]
+
+        sent_cards = []
+        for j in sent_jobs:
+            cfg = _sent_cfg(j.project)
+            sent_cards.append({
+                "job": j,
+                "render_seconds": _render_seconds(j),
+                "adv_values": _adv_values(cfg, j.filename),
+                **_delivered_clip_prefill(j, cfg),
+            })
         processing_jobs = store.list_jobs(status="processing")
 
-        # Full-automation kiosk clips (qr_only + auto_deliver) don't get an
-        # approve/reject card — they deliver themselves. The only reason one
-        # would be sitting in "ready" is that its automatic delivery failed;
-        # surface those in a compact read-only "needs attention" list with a
-        # Retry button instead of a full review card.
+        # Full-automation clips don't get an approve/reject card — they deliver
+        # themselves, so offering an Approve button for one is a contradiction.
+        # The only reason one would be sitting in "ready" is that its automatic
+        # delivery failed; surface those in a compact read-only "needs
+        # attention" list with a Retry button instead of a full review card.
         cards = []
         auto_failed = []
         for job in store.list_jobs(status="ready"):
             try:
-                config = load_config(inbox_dir / job.project)
-                is_auto_kiosk = config.delivery_mode == "qr_only" and config.auto_deliver
+                is_auto = load_config(inbox_dir / job.project).auto_deliver
             except ConfigError:
-                is_auto_kiosk = False
-            if is_auto_kiosk:
+                is_auto = False
+            if is_auto:
                 if job.error:
                     auto_failed.append(job)
                 # else: momentarily ready, about to auto-deliver — skip silently
@@ -143,7 +227,7 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
             sent_cards=sent_cards,
             project_groups=project_groups, processing_jobs=processing_jobs,
             output_log=output_log, email_log=email_log, auto_failed=auto_failed,
-            project_orientations=_project_orientations(inbox_dir),
+            project_orientations=_project_quick_toggles(inbox_dir),
         )
 
     @app.get("/status")
@@ -209,33 +293,64 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         operator can leave it open on a venue monitor as a wall of
         scan-your-clip codes that stays current on its own as new clips
         auto-deliver (see `auto_deliver` in config.json)."""
-        jobs = [j for j in store.list_jobs(project=project, status="sent")
-                if j.drive_link and not j.hidden_from_kiosk][:8]
+        delivered = [j for j in store.list_jobs(project=project, status="sent")
+                     if (j.drive_link or j.download_token) and not j.hidden_from_kiosk]
+        count = _kiosk_count(request.args.get("count"))
+        jobs = delivered[:count]
+        has_more = len(delivered) > count
         items = []
         for job in jobs:
+            primary = _guest_or_drive_link(job)
             items.append({
                 "job": job,
-                "qr_data_uri": make_qr_data_uri(job.drive_link),
+                "qr_data_uri": make_qr_data_uri(primary) if primary else None,
                 "qr_data_uri2": make_qr_data_uri(job.secondary_drive_link) if job.secondary_drive_link else None,
             })
         latest_id = jobs[0].id if jobs else None
-        return render_template("kiosk_live.html", project=project, items=items, latest_id=latest_id)
+        return render_template("kiosk_live.html", project=project, items=items, latest_id=latest_id,
+                               wifi_qr=_wifi_qr_data_uri(), has_more=has_more, count=count)
 
     @app.get("/projects/<project>/kiosk.json")
     def kiosk_live_json(project):
         """Live JSON for the monitoring page — polled so the video panel and
-        grid stay current without a full page reload restarting playback."""
-        jobs = [j for j in store.list_jobs(project=project, status="sent")
-                if j.drive_link and not j.hidden_from_kiosk][:8]
+        grid stay current without a full page reload restarting playback.
+        `?count=` grows the grid via the page's Load more button."""
+        delivered = [j for j in store.list_jobs(project=project, status="sent")
+                     if (j.drive_link or j.download_token) and not j.hidden_from_kiosk]
+        count = _kiosk_count(request.args.get("count"))
+        jobs = delivered[:count]
+        state = store.get_kiosk_state(project)
+        visible_ids = {j.id for j in jobs}
         resp = jsonify({
             "latest_id": jobs[0].id if jobs else None,
+            "live_id": state["live_job_id"] if state["live_job_id"] in visible_ids else None,
+            "paused": state["paused"],
+            "has_more": len(delivered) > count,
+            # The playback reel is deliberately NOT `clips`: that list is capped
+            # at the grid size because every tile carries a generated QR code,
+            # and the panel would then only ever cycle the newest handful. This
+            # is every delivered clip, newest-first, ids and names only - cheap
+            # next to the QR payload above. Same reel playback.json serves.
+            "reel": [{"id": j.id, "filename": j.filename} for j in delivered],
             "clips": [
                 {"id": j.id, "filename": j.filename,
-                 "qr": make_qr_data_uri(j.drive_link),
+                 "qr": make_qr_data_uri(_guest_or_drive_link(j)),
                  "qr2": make_qr_data_uri(j.secondary_drive_link) if j.secondary_drive_link else None}
                 for j in jobs
             ],
         })
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.get("/downloads.json")
+    def downloads_json():
+        """{job_id: completed-download count} for every delivered guest clip -
+        polled by the Clips tab so the "Download Complete" badges stay live."""
+        out = {
+            str(j.id): j.lan_download_count
+            for j in store.list_jobs(status="sent") if j.download_token
+        }
+        resp = jsonify(out)
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
@@ -244,8 +359,8 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         """Clips an operator hid from the kiosk screen - viewable and
         reversible here, never deleted."""
         jobs = [j for j in store.list_jobs(project=project, status="sent")
-                if j.drive_link and j.hidden_from_kiosk]
-        items = [{"job": j, "qr_data_uri": make_qr_data_uri(j.drive_link)} for j in jobs]
+                if (j.drive_link or j.download_token) and j.hidden_from_kiosk]
+        items = [{"job": j, "qr_data_uri": make_qr_data_uri(_guest_or_drive_link(j))} for j in jobs]
         return render_template("kiosk_hidden.html", project=project, items=items)
 
     @app.get("/projects/<project>/playback-background")
@@ -284,8 +399,12 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         with no cap (unlike kiosk.json's [:8]) - the reel loops through the
         full history, not just the newest handful."""
         jobs = [j for j in store.list_jobs(project=project, status="sent")
-                if j.drive_link and not j.hidden_from_kiosk]
-        resp = jsonify({"clips": [{"id": j.id, "filename": j.filename} for j in jobs]})
+                if (j.drive_link or j.download_token) and not j.hidden_from_kiosk]
+        state = store.get_kiosk_state(project)
+        resp = jsonify({
+            "paused": state["paused"],
+            "clips": [{"id": j.id, "filename": j.filename} for j in jobs],
+        })
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
@@ -349,19 +468,439 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         flash("Rescanned every project's watch folder.", "info")
         return redirect(url_for("index"))
 
+    # ---- FTP import: built-in FTP server for camera auto-import -------
+
+    def _ftp():
+        return app.config.get("FTP_SERVER")
+
+    @app.get("/ftp-import")
+    def ftp_import_page():
+        settings = load_ftp_settings(app.config["INBOX_DIR"])
+        server = _ftp()
+        if server is not None:
+            status = server.status()
+        else:
+            from .ftp_import import DEFAULT_USERNAME, firewall_command, firewall_rule_state
+            ports = parse_passive_ports(settings["passive_ports"]) or (50000, 50050)
+            connect_host = str(settings["passive_host"]).strip() or lan.lan_ip()
+            status = {
+                "running": False, "port": settings["port"], "root_dir": settings["root_dir"],
+                "lan_ip": lan.lan_ip(), "sessions": 0, "uploads_total": 0,
+                "anonymous": bool(settings["anonymous"]),
+                "username": str(settings["username"]).strip() or DEFAULT_USERNAME,
+                "passive_host": settings["passive_host"], "passive_ports": settings["passive_ports"],
+                "connect_host": connect_host,
+                "firewall_state": firewall_rule_state(int(settings["port"]), ports),
+                "firewall_command": firewall_command(int(settings["port"]), ports),
+                "clients": [], "uploads": [],
+            }
+        root_exists = bool(str(settings["root_dir"]).strip()) and Path(settings["root_dir"]).is_dir()
+        return render_template(
+            "ftp_import.html", settings=settings, status=status, root_exists=root_exists,
+            available=server is not None,
+        )
+
+    @app.get("/ftp-import/status.json")
+    def ftp_import_status():
+        server = _ftp()
+        if server is None:
+            resp = jsonify({"running": False, "available": False})
+        else:
+            resp = jsonify({"available": True, **server.status()})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.post("/ftp-import/settings")
+    def ftp_import_save():
+        inbox_dir = app.config["INBOX_DIR"]
+        form = request.form
+        root_dir = form.get("root_dir", "").strip().strip('"').strip("'")
+        if not root_dir:
+            flash("An import folder is required.", "error")
+            return redirect(url_for("ftp_import_page"))
+        try:
+            port = int(form.get("port", "2121"))
+        except ValueError:
+            flash("Port must be a number.", "error")
+            return redirect(url_for("ftp_import_page"))
+        if not (1 <= port <= 65535):
+            flash("Port must be between 1 and 65535.", "error")
+            return redirect(url_for("ftp_import_page"))
+        if parse_passive_ports(form.get("passive_ports", "")) is None:
+            flash("Passive port range must look like '50000-50050' (1024-65535, low < high).", "error")
+            return redirect(url_for("ftp_import_page"))
+        anonymous = form.get("anonymous") == "on"
+        # Blank username always resolves back to the default ("glambot"); the
+        # named account is always registered alongside anonymous access.
+        username = form.get("username", "").strip() or "glambot"
+        password = form.get("password", "")
+
+        settings = save_ftp_settings(inbox_dir, {
+            "port": port, "root_dir": root_dir, "anonymous": anonymous,
+            "username": username, "password": password,
+            "passive_host": form.get("passive_host", "").strip(),
+            "passive_ports": form.get("passive_ports", "").strip(),
+        })
+        server = _ftp()
+        if server is not None and server.running:
+            err = server.restart(settings)
+            flash(f"Saved, but restart failed: {err}" if err else "Saved and restarted the FTP server.",
+                  "error" if err else "info")
+        else:
+            flash("FTP import settings saved.", "info")
+        return redirect(url_for("ftp_import_page"))
+
+    @app.post("/ftp-import/root/create")
+    def ftp_import_create_root():
+        settings = load_ftp_settings(app.config["INBOX_DIR"])
+        try:
+            Path(settings["root_dir"]).mkdir(parents=True, exist_ok=True)
+            flash(f"Created {settings['root_dir']}.", "info")
+        except OSError as exc:
+            flash(f"Could not create that folder: {exc}", "error")
+        return redirect(url_for("ftp_import_page"))
+
+    @app.post("/ftp-import/start")
+    def ftp_import_start():
+        inbox_dir = app.config["INBOX_DIR"]
+        server = _ftp()
+        if server is None:
+            flash("The FTP server component isn't available in this build.", "error")
+            return redirect(url_for("ftp_import_page"))
+        settings = save_ftp_settings(inbox_dir, {"enabled": True})
+        err = server.start(settings)
+        if err:
+            save_ftp_settings(inbox_dir, {"enabled": False})
+            flash(f"Could not start: {err}", "error")
+        else:
+            flash("FTP import server started.", "info")
+        return redirect(url_for("ftp_import_page"))
+
+    @app.post("/ftp-import/stop")
+    def ftp_import_stop():
+        save_ftp_settings(app.config["INBOX_DIR"], {"enabled": False})
+        server = _ftp()
+        if server is not None:
+            server.stop()
+        flash("FTP import server stopped.", "info")
+        return redirect(url_for("ftp_import_page"))
+
+    @app.post("/ftp-import/firewall/apply")
+    def ftp_import_firewall_apply():
+        """Add/refresh the Windows Firewall rule for the FTP + passive ports.
+        Loopback-only: it raises a UAC prompt on the Glambot PC."""
+        if (request.remote_addr or "") not in {"127.0.0.1", "::1", "localhost"}:
+            flash("Firewall changes can only be made from the Glambot PC.", "error")
+            return redirect(url_for("ftp_import_page"))
+        server = _ftp()
+        if server is None:
+            flash("The FTP server component isn't available in this build.", "error")
+            return redirect(url_for("ftp_import_page"))
+        err = server.apply_firewall()
+        if err:
+            flash(err, "error")
+        elif server.refresh_firewall_state() == "ok":
+            flash("Windows Firewall rule applied.", "info")
+        else:
+            flash("Firewall rule not confirmed yet - it may take a moment, or was declined.", "error")
+        return redirect(url_for("ftp_import_page"))
+
+    @app.post("/ftp-import/open-folder")
+    def ftp_import_open_folder():
+        """Open the import folder in the OS file manager. Loopback-only, like /pick."""
+        if (request.remote_addr or "") not in {"127.0.0.1", "::1", "localhost"}:
+            flash("The folder can only be opened on the Glambot PC.", "error")
+            return redirect(url_for("ftp_import_page"))
+        root = Path(load_ftp_settings(app.config["INBOX_DIR"])["root_dir"])
+        if not root.is_dir():
+            flash(f"That folder doesn't exist: {root}", "error")
+            return redirect(url_for("ftp_import_page"))
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(root))  # noqa: S606 - local path from local settings
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.run(["open", str(root)], check=False)
+            else:
+                import subprocess
+                subprocess.run(["xdg-open", str(root)], check=False)
+        except OSError as exc:
+            flash(f"Could not open the folder: {exc}", "error")
+        return redirect(url_for("ftp_import_page"))
+
+    # ---- Phantom camera import: pull .cine takes off a VEO ----------
+
+    def _phantom():
+        return app.config.get("PHANTOM_SERVER")
+
+    def _phantom_local_only() -> bool:
+        return (request.remote_addr or "") in {"127.0.0.1", "::1", "localhost"}
+
+    @app.get("/phantom-import")
+    def phantom_import_page():
+        settings = load_phantom_settings(app.config["INBOX_DIR"])
+        server = _phantom()
+        status = server.status() if server is not None else {"running": False}
+        dest = str(settings["dest_dir"]).strip()
+        return render_template(
+            "phantom_import.html", settings=settings, status=status,
+            available=server is not None,
+            dest_exists=bool(dest) and Path(dest).is_dir(),
+        )
+
+    @app.get("/phantom-import/status.json")
+    def phantom_import_status():
+        server = _phantom()
+        if server is None:
+            resp = jsonify({"running": False, "available": False})
+        else:
+            resp = jsonify({"available": True, **server.status()})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.get("/phantom-import/camera.json")
+    def phantom_import_camera():
+        server = _phantom()
+        if server is None:
+            resp = jsonify({"available": False})
+        else:
+            resp = jsonify({"available": True, **server.camera_json()})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.get("/phantom-import/port-owner")
+    def phantom_import_port_owner():
+        """Chataigne polls this: 'chataigne' = safe to hold TCP 7115,
+        'glambot' = disconnect now, Glambot needs the camera."""
+        server = _phantom()
+        owner = server.port_owner if server is not None else "chataigne"
+        resp = jsonify({"owner": owner})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.post("/phantom-import/take-complete")
+    def phantom_import_take_complete():
+        """Chataigne calls this right after it sends `trig` and sees `STR`."""
+        server = _phantom()
+        if server is None or not server.running:
+            return jsonify({"ok": False, "error": "phantom import not running"}), 503
+        data = request.get_json(silent=True) or request.form
+        partition = data.get("partition")
+        server.note_take_complete(partition)
+        return jsonify({"ok": True})
+
+    @app.post("/phantom-import/settings")
+    def phantom_import_save():
+        inbox_dir = app.config["INBOX_DIR"]
+        form = request.form
+        dest_dir = form.get("dest_dir", "").strip().strip('"').strip("'")
+        if not dest_dir:
+            flash("A download folder is required.", "error")
+            return redirect(url_for("phantom_import_page"))
+        try:
+            partition_count = max(1, int(form.get("partition_count", "4")))
+        except ValueError:
+            flash("Partition count must be a number.", "error")
+            return redirect(url_for("phantom_import_page"))
+        settings = save_phantom_settings(inbox_dir, {
+            "camera_ip": form.get("camera_ip", "").strip(),
+            "camera_serial": form.get("camera_serial", "").strip(),
+            "partition_count": partition_count,
+            # Anything outside this set is either unsupported by the bridge or
+            # not what the grade pipeline reads, and used to be persisted
+            # unchecked and only fail much later, mid-download.
+            "file_type": _phantom_file_type(form.get("file_type")),
+            "dest_dir": dest_dir,
+            "delete_after_import": form.get("delete_after_import") == "on",
+            "handoff_mode": form.get("handoff_mode", "notify").strip() or "notify",
+            "handoff_notify_url": form.get("handoff_notify_url", "").strip(),
+            "poll_seconds": int(form.get("poll_seconds") or 5) if str(form.get("poll_seconds") or "5").isdigit() else 5,
+        })
+        server = _phantom()
+        if server is not None and server.running:
+            err = server.restart(settings)
+            flash(f"Saved, but restart failed: {err}" if err else "Saved and reconnected.",
+                  "error" if err else "info")
+        else:
+            flash("Phantom import settings saved.", "info")
+        return redirect(url_for("phantom_import_page"))
+
+    @app.post("/phantom-import/camera/settings")
+    def phantom_import_camera_settings():
+        server = _phantom()
+        if server is None or not server.running:
+            return jsonify({"ok": False, "error": "phantom import not running"}), 503
+        fields = request.get_json(silent=True) or {k: v for k, v in request.form.items()}
+        result = server.queue_settings(fields)
+        return jsonify({"ok": True, **result})
+
+    @app.post("/phantom-import/quick-settings")
+    def phantom_import_quick_settings():
+        """Persist which live-camera fields the quick-settings card shows.
+        Display-only preference - never restarts the server."""
+        data = request.get_json(silent=True) or {}
+        fields = data.get("fields") if isinstance(data, dict) else None
+        fields = [str(f) for f in fields if str(f)] if isinstance(fields, list) else []
+        save_phantom_settings(app.config["INBOX_DIR"], {"quick_settings": fields})
+        server = _phantom()
+        if server is not None:
+            server.set_quick_settings(fields)
+        return jsonify({"ok": True, "quick_settings": fields})
+
+    @app.post("/phantom-import/download-mode")
+    def phantom_import_download_mode():
+        """Toggle auto vs. manual download - applies live, no restart."""
+        data = request.get_json(silent=True) or request.form
+        auto = str(data.get("auto")).lower() in {"1", "true", "on", "yes"}
+        save_phantom_settings(app.config["INBOX_DIR"], {"auto_download": auto})
+        server = _phantom()
+        if server is not None:
+            server.set_auto_download(auto)
+        return jsonify({"ok": True, "auto_download": auto})
+
+    @app.post("/phantom-import/dest/create")
+    def phantom_import_create_dest():
+        settings = load_phantom_settings(app.config["INBOX_DIR"])
+        try:
+            Path(settings["dest_dir"]).mkdir(parents=True, exist_ok=True)
+            flash(f"Created {settings['dest_dir']}.", "info")
+        except OSError as exc:
+            flash(f"Could not create that folder: {exc}", "error")
+        return redirect(url_for("phantom_import_page"))
+
+    @app.post("/phantom-import/start")
+    def phantom_import_start():
+        inbox_dir = app.config["INBOX_DIR"]
+        server = _phantom()
+        if server is None:
+            flash("The camera bridge component isn't available in this build.", "error")
+            return redirect(url_for("phantom_import_page"))
+        settings = save_phantom_settings(inbox_dir, {"enabled": True})
+        err = server.start(settings)
+        if err:
+            save_phantom_settings(inbox_dir, {"enabled": False})
+            flash(f"Could not start: {err}", "error")
+        else:
+            flash("Phantom import started.", "info")
+        return redirect(url_for("phantom_import_page"))
+
+    @app.post("/phantom-import/stop")
+    def phantom_import_stop():
+        save_phantom_settings(app.config["INBOX_DIR"], {"enabled": False})
+        server = _phantom()
+        if server is not None:
+            server.stop()
+        flash("Phantom import stopped.", "info")
+        return redirect(url_for("phantom_import_page"))
+
+    @app.post("/phantom-import/download-now")
+    def phantom_import_download_now():
+        server = _phantom()
+        if server is None or not server.running:
+            flash("Phantom import isn't running.", "error")
+            return redirect(url_for("phantom_import_page"))
+        server.download_now()
+        flash("Download requested - it runs on the next port handoff.", "info")
+        return redirect(url_for("phantom_import_page"))
+
+    @app.post("/phantom-import/backfill-looks")
+    def phantom_import_backfill_looks():
+        """Write colour sidecars for clips already downloaded, so they render
+        with the camera's own tone curve instead of the flat fallback."""
+        server = _phantom()
+        if server is None:
+            return jsonify({"ok": False, "error": "the camera bridge isn't available"}), 503
+        result = server.backfill_looks()
+        if result.get("ok"):
+            flash(f"Colour profiles: {result['written']} written, "
+                  f"{result['skipped']} already had one, {result['failed']} failed.", "info")
+        else:
+            flash(f"Backfill failed: {result.get('error')}", "error")
+        return redirect(url_for("phantom_import_page"))
+
+    @app.post("/phantom-import/cancel-save")
+    def phantom_import_cancel_save():
+        """Abort the transfer in progress. The take stays on the camera."""
+        server = _phantom()
+        if server is None or not server.running:
+            return jsonify({"ok": False, "error": "phantom import not running"}), 503
+        return jsonify(server.cancel_active_save())
+
+    @app.post("/phantom-import/open-folder")
+    def phantom_import_open_folder():
+        if not _phantom_local_only():
+            flash("The folder can only be opened on the Glambot PC.", "error")
+            return redirect(url_for("phantom_import_page"))
+        dest = Path(load_phantom_settings(app.config["INBOX_DIR"])["dest_dir"])
+        if not dest.is_dir():
+            flash(f"That folder doesn't exist: {dest}", "error")
+            return redirect(url_for("phantom_import_page"))
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(dest))  # noqa: S606
+            else:
+                import subprocess
+                subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", str(dest)], check=False)
+        except OSError as exc:
+            flash(f"Could not open the folder: {exc}", "error")
+        return redirect(url_for("phantom_import_page"))
+
+    @app.post("/pick")
+    def pick():
+        """Pop a native OS file/folder dialog on the machine hosting Glambot and
+        return what the operator picked. Loopback-only: from a LAN iPad this
+        would pop a dialog on the Glambot PC, which is never what the tapper
+        wants - the page falls back to a typed path there."""
+        if (request.remote_addr or "") not in {"127.0.0.1", "::1", "localhost"}:
+            return jsonify({"ok": False, "reason": "unsupported"})
+        kind = request.form.get("kind", "folder")
+        if kind not in {"folder", "footage"}:
+            return jsonify({"ok": False, "reason": "error", "error": "bad kind"}), 400
+        initial = request.form.get("initial", "").strip().strip('"').strip("'")
+
+        selection = nativeui.pick(kind, initial)
+        if selection is None:
+            return jsonify({"ok": False, "reason": "unsupported"})
+        if not selection:
+            return jsonify({"ok": False, "reason": "cancelled"})
+
+        if kind == "folder":
+            folder = Path(selection[0])
+            if not folder.is_dir():
+                return jsonify({"ok": False, "reason": "error",
+                                "error": "That isn't a folder."}), 400
+            return jsonify({"ok": True, "path": str(folder)})
+
+        files = []
+        parent = None
+        for raw in selection:
+            p = Path(raw)
+            if not (p.is_file() and is_footage_file(p)):
+                continue
+            if parent is None:
+                parent = p.parent
+            if p.parent != parent:
+                return jsonify({"ok": False, "reason": "multi_folder"})
+            files.append({"name": p.name, "size": p.stat().st_size})
+        if not files:
+            return jsonify({"ok": False, "reason": "error",
+                            "error": "None of those were footage files."}), 400
+        return jsonify({"ok": True, "folder": str(parent), "files": files})
+
     @app.get("/projects/<project>/import")
     def import_footage_form(project):
         _resolve_project(project)
         return render_template("import_footage.html", project=project)
 
-    @app.post("/projects/<project>/import")
-    def import_footage(project):
+    def _resolve_import_target(project):
+        """Shared by /import and /import/check: returns (dest_dir, folder,
+        chosen_names, error). `error` is a user-facing string when the import
+        can't proceed; the caller decides how to surface it."""
         project_dir = _resolve_project(project)
         try:
             config = load_config(project_dir)
         except ConfigError as exc:
-            flash(f"Config problem: {exc}", "error")
-            return redirect(url_for("import_footage_form", project=project))
+            return None, None, [], f"Config problem: {exc}"
 
         # Shared-folder safety: refuse if this project isn't the active
         # owner of its watch folder, so imported footage is never silently
@@ -374,33 +913,81 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         if sharing:
             active = store.get_active_project(str(dest_dir))
             if active != project:
-                flash(
+                return None, None, [], (
                     f"This project's footage folder is shared with {', '.join(sharing)} "
                     f"and '{active}' is currently active for it - imported files would be "
-                    f"attributed there instead. Switch the active project first.", "error",
+                    f"attributed there instead. Switch the active project first."
                 )
-                return redirect(url_for("import_footage_form", project=project))
 
         folder_path = request.form.get("folder", "").strip()
         folder = Path(folder_path) if folder_path else None
         if not folder or not folder.is_dir():
-            flash("That folder no longer exists.", "error")
-            return redirect(url_for("import_footage_form", project=project))
+            return None, None, [], "That folder no longer exists."
 
         # Never trust submitted filenames directly - recompute the real
         # footage listing for this exact folder fresh, same anti-tampering
         # pattern as delete_all_projects.
         available = {p.name for p in folder.iterdir() if p.is_file() and is_footage_file(p)}
         chosen = [name for name in request.form.getlist("files") if name in available]
+        return dest_dir, folder, chosen, None
+
+    @app.post("/projects/<project>/import/check")
+    def import_footage_check(project):
+        """Report, per selected file, whether importing it would collide with a
+        file already in the destination folder or with footage already rendered
+        for this project - so the page can ask the operator how to resolve it."""
+        dest_dir, folder, chosen, error = _resolve_import_target(project)
+        if error:
+            return jsonify({"ok": False, "error": error}), 400
+        conflicts = []
+        clean = []
+        for name in chosen:
+            dupe = None
+            digest = content_hash(folder / name)
+            if digest is not None:
+                job = store.find_by_hash(digest, project)
+                if job is not None:
+                    dupe = {"id": job.id, "filename": job.filename, "status": job.status}
+            dest = dest_dir / name
+            # A file that IS the one already in the watch folder isn't a
+            # collision - importing it just re-queues it in place.
+            name_collision = dest.exists() and dest.resolve() != (folder / name).resolve()
+            if dupe or name_collision:
+                conflicts.append({
+                    "name": name, "name_collision": name_collision, "duplicate_job": dupe,
+                })
+            else:
+                clean.append(name)
+        return jsonify({"ok": True, "conflicts": conflicts, "clean": clean})
+
+    @app.post("/projects/<project>/import")
+    def import_footage(project):
+        dest_dir, folder, chosen, error = _resolve_import_target(project)
+        if error:
+            flash(error, "error")
+            return redirect(url_for("import_footage_form", project=project))
         if not chosen:
             flash("Nothing was selected - nothing was imported.", "info")
             return redirect(url_for("import_footage_form", project=project))
 
+        # decision_<name> = rename | replace | skip  (absent => plain import).
+        decisions = {
+            name: request.form.get(f"decision_{name}", "").strip().lower()
+            for name in chosen
+        }
+        decisions = {k: v for k, v in decisions.items() if v in {"rename", "replace", "skip"}}
+        to_import = [name for name in chosen if decisions.get(name) != "skip"]
+        if not to_import:
+            flash("Every selected file was skipped - nothing was imported.", "info")
+            return redirect(url_for("import_footage_form", project=project))
+
         dest_dir.mkdir(parents=True, exist_ok=True)
         threading.Thread(
-            target=_import_worker, args=(folder, chosen, dest_dir, watcher), daemon=True,
+            target=_import_worker,
+            args=(folder, to_import, dest_dir, watcher, decisions, store, project),
+            daemon=True,
         ).start()
-        flash(f"Importing {len(chosen)} file(s) into {project}...", "info")
+        flash(f"Importing {len(to_import)} file(s) into {project}...", "info")
         return redirect(url_for("index"))
 
     @app.post("/jobs/<int:job_id>/approve")
@@ -429,7 +1016,7 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
             return redirect(url_for("index"))
 
         try:
-            result = deliver(
+            deliver(
                 job, config, store, app.config["INBOX_DIR"],
                 recipient=recipient, subject=subject, body=body, delivery_mode=delivery_mode,
             )
@@ -442,11 +1029,11 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
             flash(f"Delivery failed: {exc}", "error")
             return redirect(url_for("index"))
 
-        template = "kiosk.html" if delivery_mode == "qr_only" else "sent.html"
-        return render_template(
-            template, job=result.job, link=result.link, qr_data_uri=result.qr_data_uri,
-            link2=result.link2, qr_data_uri2=result.qr_data_uri2,
-        )
+        if delivery_mode == "email":
+            flash(f"Sent {job.filename} to {recipient}.", "info")
+        else:
+            flash(f"Approved {job.filename} — now on the kiosk.", "info")
+        return redirect(url_for("index") + "#clips")
 
     @app.post("/jobs/<int:job_id>/reject")
     def reject(job_id):
@@ -460,25 +1047,24 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
 
     @app.post("/jobs/<int:job_id>/rerender")
     def rerender(job_id):
-        """Re-run the render for a job that failed — typically one whose
-        output came out truncated. process_job() skips archiving the original
-        when its integrity check fails, so the source is still sitting in the
-        import folder and can simply be run again."""
+        """Re-run the render for a job that failed, or one already rendered that
+        needs a fresh pass after a config change. process_job()/_resolve_source
+        find the source either in its import folder or in the Footage/ archive."""
         job = store.get_job(job_id)
         if job is None:
             flash("Job not found.", "error")
-            return redirect(url_for("index"))
-        source = Path(job.source_path)
-        if not source.exists():
-            flash(
-                f"Cannot re-render {job.filename}: the source file is no longer at "
-                f"{job.source_path}.", "error",
-            )
             return redirect(url_for("index"))
         try:
             config = load_config(app.config["INBOX_DIR"] / job.project)
         except ConfigError as exc:
             flash(f"Config problem: {exc}", "error")
+            return redirect(url_for("index"))
+        from .processor import source_available
+        if not source_available(job, config):
+            flash(
+                f"Cannot re-render {job.filename}: its source footage could not be "
+                f"found (looked at {job.source_path} and the Footage archive).", "error",
+            )
             return redirect(url_for("index"))
 
         store.update_job(job_id, status="processing", error=None, progress=0)
@@ -499,14 +1085,15 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         app.py's index() error_jobs/can_rerender), so this never does
         anything the operator couldn't already trigger one-by-one."""
         inbox_dir = app.config["INBOX_DIR"]
+        from .processor import source_available
         targets = []
         for job in store.list_jobs(status="error"):
-            if not (job.source_path and Path(job.source_path).exists()):
-                continue
             try:
                 config = load_config(inbox_dir / job.project)
             except ConfigError as exc:
                 store.update_job(job.id, error=f"Config problem: {exc}")
+                continue
+            if not source_available(job, config):
                 continue
             targets.append((job, config))
         if not targets:
@@ -561,7 +1148,7 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
                 config = load_config(inbox_dir / job.project)
             except ConfigError:
                 continue
-            if config.delivery_mode == "qr_only" and config.auto_deliver:
+            if config.auto_deliver:
                 targets.append((job, config))
         if not targets:
             flash("No failed deliveries to retry.", "info")
@@ -578,34 +1165,68 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         them — useful for kiosk/auto clips that were never emailed."""
         jobs = [j for j in store.list_jobs(status="sent") if j.drive_link]
         cards = []
+        config_cache: dict[str, object] = {}
         for job in jobs:
-            subject_default, body_default = "", ""
-            try:
-                raw_subject, raw_body = load_default_template()
-                subject_default = resolve_placeholders(raw_subject, link="{link}", project=job.project, filename=job.filename)
-                body_default = resolve_placeholders(raw_body, link="{link}", project=job.project, filename=job.filename)
-            except Exception:
-                pass
-            cards.append({
-                "job": job,
-                "recipient_default": job.recipient_email or "",
-                "subject_default": subject_default,
-                "body_default": body_default,
-            })
-        return render_template("edited_clips.html", cards=cards)
+            if job.project not in config_cache:
+                try:
+                    config_cache[job.project] = load_config(app.config["INBOX_DIR"] / job.project)
+                except ConfigError:
+                    config_cache[job.project] = None
+            cfg = config_cache[job.project]
+            cards.append({"job": job, **_delivered_clip_prefill(job, cfg)})
+
+        template_projects = [
+            {"name": name,
+             "email_subject": cfg.email_subject or "" if cfg else "",
+             "email_body": cfg.email_body or "" if cfg else ""}
+            for name, cfg in sorted(config_cache.items()) if cfg is not None
+        ]
+        return render_template(
+            "edited_clips.html", cards=cards, template_projects=template_projects,
+            default_email_subject=_safe_default_template()[0],
+            default_email_body=_safe_default_template()[1],
+        )
+
+    @app.post("/projects/<project>/email-template")
+    def save_email_template(project):
+        """Set a project's email_subject / email_body directly (used by the
+        'Email a delivered clip' page's template panel). Raw read-modify-write,
+        same pattern as override_job."""
+        project_dir = _resolve_project(project)
+        config_path = project_dir / "config.json"
+        back = request.referrer or url_for("edited_clips")
+        prev = config_path.read_text(encoding="utf-8")
+        try:
+            data = json.loads(prev)
+            assert isinstance(data, dict)
+        except (json.JSONDecodeError, AssertionError):
+            flash(f"Could not read {project}'s config.", "error")
+            return redirect(back)
+        data["email_subject"] = request.form.get("email_subject", "").strip() or None
+        data["email_body"] = request.form.get("email_body", "") or None
+        config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        try:
+            load_config(project_dir)
+        except ConfigError as exc:
+            config_path.write_text(prev, encoding="utf-8")
+            flash(f"Could not save template: {exc}", "error")
+            return redirect(back)
+        flash(f"Updated {project}'s email template.", "info")
+        return redirect(back)
 
     @app.post("/jobs/<int:job_id>/email")
     def email_clip(job_id):
         """Email an already-delivered clip's existing Drive link (no
         re-upload / re-process) — the same email an email-mode Approve sends."""
+        back = request.referrer or url_for("edited_clips")
         job = store.get_job(job_id)
         if job is None or job.status != "sent" or not job.drive_link:
             flash("That clip isn't available to email.", "error")
-            return redirect(url_for("edited_clips"))
+            return redirect(back)
         recipient = request.form.get("recipient_email", "").strip()
         if not recipient or "@" not in recipient:
             flash("A valid recipient email is required.", "error")
-            return redirect(url_for("edited_clips"))
+            return redirect(back)
         subject = request.form.get("subject", "").strip()
         body = request.form.get("body", "")
         link, link2 = job.drive_link, job.secondary_drive_link
@@ -618,9 +1239,9 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         except EmailError as exc:
             logger.exception("Emailing clip %s failed", job_id)
             flash(f"Email failed: {exc}", "error")
-            return redirect(url_for("edited_clips"))
+            return redirect(back)
         flash(f"Emailed {job.filename} to {recipient}.", "info")
-        return redirect(url_for("edited_clips"))
+        return redirect(back)
 
     @app.get("/projects/new")
     def new_project_form():
@@ -641,8 +1262,8 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         if error:
             return _form_error(error)
         data = fields["data"]
-        overlay_file = fields["overlay_file"]
-        second_overlay_file = fields["second_overlay_file"]
+        vertical_overlay_file = fields["vertical_overlay_file"]
+        horizontal_overlay_file = fields["horizontal_overlay_file"]
         soundtrack_file = fields["soundtrack_file"]
         background_file = fields["background_file"]
         project_name = fields["name"]
@@ -668,11 +1289,16 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
             saved_overlays.append(dest)
             return f"overlays/{dest.name}"
 
-        # Overlay is optional now — only save/reference it when uploaded.
-        if overlay_file is not None:
-            data["overlay"] = _save_overlay(overlay_file)
-        if second_overlay_file is not None:
-            data["second_overlay"] = _save_overlay(second_overlay_file)
+        # Overlays are optional — only save/reference one when uploaded; a
+        # "remove" tick clears it (upload wins over remove if both arrive).
+        if vertical_overlay_file is not None:
+            data["vertical_overlay"] = _save_overlay(vertical_overlay_file)
+        elif fields["vertical_overlay_remove"]:
+            data["vertical_overlay"] = None
+        if horizontal_overlay_file is not None:
+            data["horizontal_overlay"] = _save_overlay(horizontal_overlay_file)
+        elif fields["horizontal_overlay_remove"]:
+            data["horizontal_overlay"] = None
 
         soundtrack_path = None
         if soundtrack_file is not None:
@@ -756,6 +1382,29 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         flash(
             f"“{project}” now renders {orientation} ({new_width}x{new_height}) "
             "for new footage — clips already processed are unaffected.",
+            "info",
+        )
+        return redirect(url_for("index") + "#clips")
+
+    @app.post("/projects/<project>/toggle-delivery-mode")
+    def toggle_delivery_mode(project):
+        """Flip a project between manual approval and full-auto delivery - the
+        quick review-page equivalent of the "Full automation" checkbox in the
+        project's Mode fieldset. Valid in every delivery mode: approval is now
+        independent of where clips go. Newly-processed clips follow the new
+        setting; anything already rendered / delivered is untouched."""
+        project_dir = _resolve_project(project)
+        try:
+            config = load_config(project_dir)
+        except ConfigError as exc:
+            flash(f"Config problem: {exc}", "error")
+            return redirect(url_for("index") + "#clips")
+        new_value = not config.auto_deliver
+        save_config(project_dir, {"auto_deliver": new_value}, merge=True)
+        flash(
+            f"“{project}” now delivers automatically as soon as clips are "
+            "processed — no Approve click." if new_value else
+            f"“{project}” now waits for manual approval before delivering.",
             "info",
         )
         return redirect(url_for("index") + "#clips")
@@ -858,6 +1507,7 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         # currently-broken config (invalid JSON or failed validation) can
         # still be opened here and fixed, instead of being unreachable.
         error = None
+        asset_warnings: list[str] = []
         try:
             data = json.loads(config_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
@@ -867,16 +1517,18 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
             error = f"config.json is not valid JSON ({exc}) — fix and save to repair it."
         else:
             try:
-                load_config(project_dir)
+                asset_warnings = list(load_config(project_dir).missing_assets)
             except ConfigError as exc:
                 error = str(exc)
 
         values = _project_values_for_edit(data, project)
         return render_template(
             "project_form.html", mode="edit", error=error, values=values,
-            existing_overlay=data.get("overlay"), existing_second_overlay=data.get("second_overlay"),
+            asset_warnings=asset_warnings,
+            existing_vertical_overlay=data.get("vertical_overlay") or data.get("overlay"),
+            existing_horizontal_overlay=data.get("horizontal_overlay") or data.get("second_overlay"),
             existing_background=data.get("playback_background"),
-            **_project_form_kwargs(),
+            **_project_form_kwargs(_project_footage_files(inbox_dir, project)),
         )
 
     @app.post("/projects/<project>/edit")
@@ -898,18 +1550,18 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         def _form_error(message: str):
             return render_template(
                 "project_form.html", mode="edit", error=message, values=request.form,
-                existing_overlay=existing_data.get("overlay"),
-                existing_second_overlay=existing_data.get("second_overlay"),
+                existing_vertical_overlay=existing_data.get("vertical_overlay") or existing_data.get("overlay"),
+                existing_horizontal_overlay=existing_data.get("horizontal_overlay") or existing_data.get("second_overlay"),
                 existing_background=existing_data.get("playback_background"),
-                **_project_form_kwargs(),
+                **_project_form_kwargs(_project_footage_files(inbox_dir, project)),
             ), 400
 
         fields, error = _parse_project_form(request)
         if error:
             return _form_error(error)
         data = fields["data"]
-        overlay_file = fields["overlay_file"]
-        second_overlay_file = fields["second_overlay_file"]
+        vertical_overlay_file = fields["vertical_overlay_file"]
+        horizontal_overlay_file = fields["horizontal_overlay_file"]
         soundtrack_file = fields["soundtrack_file"]
         background_file = fields["background_file"]
         # Renaming isn't supported here — project_name is read-only on the
@@ -926,14 +1578,23 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
             file_storage.save(dest)
             return f"overlays/{dest.name}"
 
-        # Only touch overlay/second_overlay/soundtrack/background when
-        # something new was actually uploaded this submission — otherwise
-        # leave the key out of `data` so save_config()'s merge preserves the
-        # existing reference.
-        if overlay_file is not None:
-            data["overlay"] = _save_overlay(overlay_file)
-        if second_overlay_file is not None:
-            data["second_overlay"] = _save_overlay(second_overlay_file)
+        # One-shot migration: fold legacy overlay keys into the orientation
+        # model so a later "remove" isn't masked by the load_config fallback,
+        # and a broken legacy `overlay` reference has a home in the new form.
+        existing_data = _migrate_overlay_keys(config_path, existing_data)
+
+        # Only touch an overlay/soundtrack/background key when something new was
+        # actually uploaded this submission — otherwise leave the key out of
+        # `data` so save_config()'s merge preserves the existing reference.
+        # A "remove" tick clears it; an upload wins over a remove.
+        if vertical_overlay_file is not None:
+            data["vertical_overlay"] = _save_overlay(vertical_overlay_file)
+        elif fields["vertical_overlay_remove"]:
+            data["vertical_overlay"] = None
+        if horizontal_overlay_file is not None:
+            data["horizontal_overlay"] = _save_overlay(horizontal_overlay_file)
+        elif fields["horizontal_overlay_remove"]:
+            data["horizontal_overlay"] = None
         if soundtrack_file is not None:
             _SOUNDTRACKS_DIR.mkdir(parents=True, exist_ok=True)
             soundtrack_filename = secure_filename(soundtrack_file.filename)
@@ -967,7 +1628,565 @@ def create_app(inbox_dir: Path, store: JobStore, watcher: InboxWatcher) -> Flask
         )
         return redirect(url_for("index"))
 
+    # ---- iPad / touch remote + PWA -----------------------------------
+
+    @app.get("/manifest.webmanifest")
+    def glambot_manifest():
+        return jsonify({
+            "name": "Glambot",
+            "short_name": "Glambot",
+            "start_url": "/",
+            "scope": "/",
+            "display": "standalone",
+            "background_color": "#0b0b0c",
+            "theme_color": "#0b0b0c",
+            "icons": [
+                {"src": "/icons/192.png", "sizes": "192x192", "type": "image/png"},
+                {"src": "/icons/512.png", "sizes": "512x512", "type": "image/png"},
+            ],
+        }), 200, {"Content-Type": "application/manifest+json"}
+
+    @app.get("/icons/<int:size>.png")
+    def app_icon(size):
+        size = max(16, min(1024, size))
+        cached = _ICON_CACHE.get(size)
+        if cached is None:
+            from io import BytesIO
+            from PIL import Image
+            src = _REPO_ROOT / "logo" / "glambotlogo.png"
+            img = Image.open(src).convert("RGBA") if src.exists() else Image.new("RGBA", (size, size), (11, 11, 12, 255))
+            img = img.resize((size, size))
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            cached = buf.getvalue()
+            _ICON_CACHE[size] = cached
+        return app.response_class(cached, mimetype="image/png")
+
+    @app.get("/remote")
+    def remote():
+        return render_template("remote.html")
+
+    @app.get("/remote.json")
+    def remote_json():
+        inbox_dir = app.config["INBOX_DIR"]
+        ready = []
+        for job in store.list_jobs(status="ready"):
+            try:
+                config = load_config(inbox_dir / job.project)
+                if config.delivery_mode == "qr_only" and config.auto_deliver:
+                    continue  # self-delivering; not an operator decision
+            except ConfigError:
+                pass
+            ready.append({
+                "id": job.id, "project": job.project, "filename": job.filename,
+                "thumb": bool(job.thumbnail_path),
+                "recipient_default": job.recipient_email or "",
+            })
+        # Only the active owner of each (possibly shared) watch folder gets a
+        # section here - a non-active peer project's clips would just be
+        # operator confusion (see _compute_project_groups / Projects tab).
+        active_names = set()
+        for group in _compute_project_groups(inbox_dir, store):
+            if group["shared"]:
+                active_names.add(group["active"])
+            else:
+                active_names.update(group["projects"])
+        count = _kiosk_count(request.args.get("count"))
+        projects = []
+        for name in sorted({j.project for j in store.list_jobs(status="sent")}):
+            if name not in active_names:
+                continue
+            clips = [j for j in store.list_jobs(project=name, status="sent")
+                     if (j.drive_link or j.download_token) and not j.hidden_from_kiosk]
+            if not clips:
+                continue
+            state = store.get_kiosk_state(name)
+            projects.append({
+                "project": name,
+                "paused": state["paused"],
+                "live_job_id": state["live_job_id"],
+                "has_more": len(clips) > count,
+                "clips": [{"id": j.id, "filename": j.filename, "thumb": bool(j.thumbnail_path),
+                           "recipient_default": j.recipient_email or ""} for j in clips[:count]],
+            })
+        resp = jsonify({"ready": ready, "projects": projects})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.post("/remote/jobs/<int:job_id>/approve")
+    def remote_approve(job_id):
+        job = store.get_job(job_id)
+        if job is None or job.status != "ready":
+            return jsonify({"ok": False, "error": "not ready"}), 409
+        inbox_dir = app.config["INBOX_DIR"]
+        try:
+            config = load_config(inbox_dir / job.project)
+        except ConfigError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+        recipient = request.form.get("recipient_email", "").strip()
+        delivery_mode = request.form.get("delivery_mode", "").strip()
+        try:
+            if recipient or delivery_mode:
+                # Operator picked an explicit recipient/mode on the remote.
+                mode = delivery_mode if delivery_mode in _VALID_DELIVERY_MODES else "email"
+                if mode == "email" and (not recipient or "@" not in recipient):
+                    return jsonify({"ok": False, "error": "A valid recipient email is required."}), 400
+                subject, body = "", ""
+                try:
+                    raw_s, raw_b = _resolve_email_template(config)
+                    subject = resolve_placeholders(raw_s, link="{link}", project=job.project, filename=job.filename)
+                    body = resolve_placeholders(raw_b, link="{link}", project=job.project, filename=job.filename)
+                except Exception:
+                    pass
+                deliver(job, config, store, inbox_dir, recipient=recipient or None,
+                        subject=subject, body=body, delivery_mode=mode)
+            else:
+                _retry_one_delivery(job, config, store, inbox_dir)
+        except (DriveError, EmailError, DeliveryError) as exc:
+            logger.exception("Remote approve failed for job %s", job_id)
+            store.update_job(job_id, error=f"Delivery failed: {exc}")
+            return jsonify({"ok": False, "error": str(exc)}), 502
+        return jsonify({"ok": True})
+
+    @app.post("/remote/jobs/<int:job_id>/email")
+    def remote_email(job_id):
+        """Re-email an already-delivered clip's link (Drive link, or the LAN
+        guest link for an offline clip) - no re-upload."""
+        job = store.get_job(job_id)
+        if job is None or job.status != "sent":
+            return jsonify({"ok": False, "error": "That clip isn't available to email."}), 409
+        link = _guest_or_drive_link(job)
+        if not link:
+            return jsonify({"ok": False, "error": "This clip has no shareable link."}), 409
+        recipient = request.form.get("recipient_email", "").strip()
+        if not recipient or "@" not in recipient:
+            return jsonify({"ok": False, "error": "A valid recipient email is required."}), 400
+        link2 = job.secondary_drive_link
+        try:
+            cfg = load_config(app.config["INBOX_DIR"] / job.project)
+        except ConfigError:
+            cfg = None
+        raw_s, raw_b = _resolve_email_template(cfg)
+        if not raw_s and not raw_b:
+            raw_s, raw_b = "Your video", "Here is your video: {link}"
+        subject = resolve_placeholders(raw_s, link=link, project=job.project, filename=job.filename, link2=link2)
+        body = resolve_placeholders(raw_b, link=link, project=job.project, filename=job.filename, link2=link2)
+        if link2 and "{link2}" not in raw_b:
+            body = f"{body}\n\nAlternate version: {link2}"
+        try:
+            send_delivery_email(recipient=recipient, subject=subject, body=body, link=link, link2=link2)
+        except EmailError as exc:
+            logger.exception("Remote email of clip %s failed", job_id)
+            return jsonify({"ok": False, "error": str(exc)}), 502
+        store.update_job(job_id, recipient_email=recipient)
+        return jsonify({"ok": True})
+
+    @app.post("/jobs/<int:job_id>/delete")
+    def delete_clip(job_id):
+        """Delete one clip: its rendered files + its job record. Password-gated
+        like project deletion. Used from the /remote page."""
+        job = store.get_job(job_id)
+        if job is None:
+            return jsonify({"ok": False, "error": "Job not found."}), 404
+        if job.status not in {"sent", "rejected", "error"}:
+            return jsonify({"ok": False, "error": "Only delivered / rejected / errored clips can be deleted."}), 409
+        if request.form.get("password", "") != _delete_password():
+            return jsonify({"ok": False, "error": "Wrong password."}), 403
+        _delete_job_files(job)
+        store.delete_job(job_id)
+        return jsonify({"ok": True})
+
+    @app.post("/projects/<project>/kiosk/live")
+    def set_kiosk_live(project):
+        _resolve_project(project)
+        raw_id = request.form.get("job_id", "").strip()
+        live_id = int(raw_id) if raw_id.isdigit() else None
+        paused = request.form.get("paused", "").lower() in {"1", "true", "yes", "on"}
+        store.set_kiosk_state(project, live_id, paused)
+        return jsonify({"ok": True})
+
+    # ---- Advanced editing: per-clip override + on-demand preview -----
+
+    @app.post("/jobs/<int:job_id>/override")
+    def override_job(job_id):
+        job = store.get_job(job_id)
+        if job is None or job.status not in {"ready", "error", "sent"}:
+            flash("That clip can't be edited right now.", "error")
+            return redirect(url_for("index"))
+        advanced, err = _parse_advanced_fields(request.form)
+        if err:
+            flash(err, "error")
+            return redirect(url_for("index"))
+        project_dir = app.config["INBOX_DIR"] / job.project
+        config_path = project_dir / "config.json"
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            assert isinstance(data, dict)
+        except (OSError, json.JSONDecodeError, AssertionError):
+            flash("Project config could not be read.", "error")
+            return redirect(url_for("index"))
+        previous = json.dumps(data)
+        overrides = data.setdefault("overrides", {})
+        entry = overrides.setdefault(job.filename, {})
+
+        # Grade: a non-neutral grade is stored as an override; a neutral one
+        # clears any existing override (back to the project default).
+        if advanced["grade"] is not None:
+            entry["grade"] = advanced["grade"]
+        else:
+            entry.pop("grade", None)
+
+        # Speed ramp per clip:
+        #  - the ramp editor sent a curve  -> store it as a full per-clip ramp
+        #  - the project has a ramp but the clip's ramp toggle is off
+        #                                   -> store {"enabled": False} (opt out)
+        #  - otherwise                      -> no override (project default)
+        project_has_ramp = bool(data.get("speed_ramp", {}).get("enabled"))
+        if advanced["speed_ramp"] is not None:
+            entry["speed_ramp"] = advanced["speed_ramp"]
+        elif project_has_ramp and request.form.get("speed_ramp_enabled") != "on":
+            entry["speed_ramp"] = {"enabled": False}
+        else:
+            entry.pop("speed_ramp", None)
+
+        if not entry:
+            overrides.pop(job.filename, None)
+        config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        try:
+            config = load_config(project_dir)
+        except ConfigError as exc:
+            config_path.write_text(previous, encoding="utf-8")
+            flash(f"Could not apply the edit: {exc}", "error")
+            return redirect(url_for("index"))
+        # A re-render of an already-delivered clip must re-upload the new
+        # output - clear the stale links so deliver() doesn't short-circuit
+        # on the old drive_link when it's re-approved.
+        if job.status == "sent":
+            store.update_job(job_id, drive_link=None, secondary_drive_link=None)
+        store.update_job(job_id, status="processing", error=None, progress=0)
+        threading.Thread(target=_rerender_worker, args=(store.get_job(job_id), config, store),
+                         daemon=True).start()
+        flash(f"Re-rendering {job.filename} with the new edit...", "info")
+        return redirect(url_for("index") + "#clips")
+
+    @app.post("/jobs/<int:job_id>/advanced-to-project")
+    def advanced_to_project(job_id):
+        """Push this clip's current Advanced-editing settings (grade + speed
+        ramp) up to the project default. Folds the clip's own override in so it
+        now inherits the default it just set. Does NOT re-render anything -
+        already-rendered clips keep their look until re-rendered, exactly like
+        editing the project form."""
+        job = store.get_job(job_id)
+        if job is None:
+            flash("Job not found.", "error")
+            return redirect(url_for("index"))
+        advanced, err = _parse_advanced_fields(request.form)
+        if err:
+            flash(err, "error")
+            return redirect(url_for("index"))
+        project_dir = app.config["INBOX_DIR"] / job.project
+        config_path = project_dir / "config.json"
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            assert isinstance(data, dict)
+        except (OSError, json.JSONDecodeError, AssertionError):
+            flash("Project config could not be read.", "error")
+            return redirect(url_for("index"))
+        previous = json.dumps(data)
+
+        data["grade"] = advanced["grade"]
+        data["speed_ramp"] = advanced["speed_ramp"]
+        entry = data.get("overrides", {}).get(job.filename)
+        if isinstance(entry, dict):
+            entry.pop("grade", None)
+            entry.pop("speed_ramp", None)
+            if not entry:
+                data["overrides"].pop(job.filename, None)
+
+        config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        try:
+            load_config(project_dir)
+        except ConfigError as exc:
+            config_path.write_text(previous, encoding="utf-8")
+            flash(f"Could not apply to the project: {exc}", "error")
+            return redirect(url_for("index"))
+        flash(
+            f"Saved these Advanced settings as the default for '{job.project}'. "
+            f"Clips already rendered keep their look until re-rendered.", "info",
+        )
+        return redirect(url_for("index") + "#clips")
+
+    def _do_preview(sample_path: Path, form, source_fps: float | None = None,
+                    trim_start: str | None = None, trim_end: str | None = None,
+                    color_profile: str = "camera",
+                    ) -> tuple[str | None, float | None, str | None]:
+        from .processor import (_resolve_ffmpeg, _probe_duration, _effective_duration,
+                                _FFPROBE)
+        from .effects import (Grade, SpeedRamp, build_grade_filter,
+                              build_speed_ramp_filtergraph, build_cine_source_filter)
+        ffmpeg_bin = _resolve_ffmpeg()
+        if not ffmpeg_bin:
+            return None, None, "ffmpeg is not available."
+        if not sample_path.exists():
+            return None, None, "The sample clip could not be found."
+        advanced, err = _parse_advanced_fields(form)
+        if err:
+            return None, None, err
+
+        def _fps_str(v):
+            return str(int(v)) if float(v) == int(v) else f"{float(v):g}"
+
+        # Length after the Basic-tab trim (and any raw-footage frame-rate
+        # reinterpretation) — so the preview never runs past Trim end.
+        try:
+            full_dur = _effective_duration(sample_path, trim_start, trim_end, source_fps)
+        except (OSError, ValueError):
+            full_dur = None
+        full_dur = full_dur or _probe_duration(sample_path) or 6.0
+        dur = min(6.0, full_dur)
+
+        # Raw Phantom .cine: reproduce the camera's own colour before the
+        # ramp/grade chain, exactly as build_ffmpeg_cmd() does for the real render.
+        cine_fix = ""
+        if sample_path.suffix.lower() == ".cine":
+            # Same base look as the real render, or the preview misrepresents it.
+            cine_fix = build_cine_source_filter(
+                sample_path, _FFPROBE, profile=form.get("color_profile") or color_profile)
+
+        grade = Grade(**advanced["grade"]) if advanced["grade"] else None
+        ramp = None
+        if advanced["speed_ramp"]:
+            sr = advanced["speed_ramp"]
+            ramp = SpeedRamp(points=sr["points"], interpolation=sr["interpolation"],
+                             smooth_frames=sr["smooth_frames"])
+        parts = []
+        src = "[0:v]"
+        if cine_fix:
+            parts.append(f"[0:v]{cine_fix}[cv]")
+            src = "[cv]"
+        if ramp:
+            frag, out_label, _ = build_speed_ramp_filtergraph(ramp, src, dur)
+            if frag:
+                parts.append(frag)
+                src = out_label
+        grade_str = build_grade_filter(grade, ffmpeg_bin)
+        chain = f"{src}scale=480:-2:force_original_aspect_ratio=decrease"
+        if grade_str:
+            chain += f",{grade_str}"
+        parts.append(chain + "[v]")
+        _PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+        _cleanup_previews()
+        name = f"{uuid4().hex}.mp4"
+        out_path = _PREVIEW_DIR / name
+        # -r before -i reinterprets a raw file's high capture rate; -ss before -i
+        # is a fast input seek; -t after -i caps the output length.
+        cmd = [ffmpeg_bin, "-y"]
+        if source_fps:
+            cmd += ["-r", _fps_str(source_fps)]
+        if trim_start:
+            cmd += ["-ss", trim_start]
+        cmd += ["-t", f"{dur:.2f}", "-i", str(sample_path),
+                "-filter_complex", ";".join(parts), "-map", "[v]", "-an",
+                "-preset", "ultrafast", "-crf", "28", "-movflags", "+faststart"]
+        if cine_fix:
+            cmd += ["-color_primaries", "bt709", "-color_trc", "bt709",
+                    "-colorspace", "bt709", "-color_range", "tv"]
+        cmd.append(str(out_path))
+        try:
+            import subprocess
+            from .processor import _NO_WINDOW_FLAGS
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90,
+                                    creationflags=_NO_WINDOW_FLAGS)
+        except subprocess.SubprocessError as exc:
+            return None, None, f"Preview render failed: {exc}"
+        if result.returncode != 0 or not out_path.exists():
+            logger.warning("Preview ffmpeg failed: %s", "\n".join(result.stderr.splitlines()[-8:]))
+            if sample_path.suffix.lower() in (".cine", ".braw"):
+                return None, None, (
+                    f"Couldn't decode this {sample_path.suffix.lower()} file — it needs a "
+                    "specially-built ffmpeg with the camera SDK (see README). The main "
+                    "pipeline fails the same way for this file."
+                )
+            return None, None, "Preview render failed."
+        return name, full_dur, None
+
+    @app.post("/projects/<project>/preview")
+    def preview_project(project):
+        project_dir = _resolve_project(project)
+        samples = _project_footage_files(app.config["INBOX_DIR"], project)
+        chosen = request.form.get("preview_sample", "").strip()
+        if chosen and chosen not in samples:
+            return jsonify({"ok": False, "error": "Unknown sample clip."}), 400
+        target = chosen or (samples[0] if samples else None)
+        if not target:
+            return jsonify({"ok": False, "error": "No footage in this project to preview yet."}), 400
+        for base in (project_watch_dirs(app.config["INBOX_DIR"]).get(project, project_dir),
+                     _resolve_output_footage(project_dir)):
+            if base and (base / target).exists():
+                sample_path = base / target
+                break
+        else:
+            return jsonify({"ok": False, "error": "Sample clip not found."}), 400
+        from .processor import _effective_source_fps
+        profile = "camera"
+        try:
+            _cfg = load_config(project_dir)
+            trim = _cfg.trim_for(target)
+            src_fps = _effective_source_fps(sample_path, _cfg.source_fps)
+            profile = _cfg.color_profile
+        except ConfigError:
+            trim, src_fps = None, _effective_source_fps(sample_path, None)
+        name, duration, err = _do_preview(
+            sample_path, request.form, source_fps=src_fps,
+            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None),
+            color_profile=profile)
+        if err:
+            return jsonify({"ok": False, "error": err}), 400
+        return jsonify({"ok": True, "url": url_for("serve_preview", project=project, name=name),
+                        "duration": _trimmed_preview_duration(sample_path, trim, duration, src_fps)})
+
+    @app.post("/jobs/<int:job_id>/preview")
+    def preview_job(job_id):
+        job = store.get_job(job_id)
+        if job is None:
+            return jsonify({"ok": False, "error": "Job not found."}), 404
+        try:
+            config = load_config(app.config["INBOX_DIR"] / job.project)
+        except ConfigError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        from .processor import _resolve_source, _effective_source_fps
+        sample_path = _resolve_source(job, config)
+        trim = config.trim_for(job.filename)
+        src_fps = _effective_source_fps(sample_path, config.source_fps)
+        name, duration, err = _do_preview(
+            sample_path, request.form, source_fps=src_fps,
+            trim_start=getattr(trim, "start", None), trim_end=getattr(trim, "end", None),
+            color_profile=config.color_profile)
+        if err:
+            return jsonify({"ok": False, "error": err}), 400
+        return jsonify({"ok": True, "url": url_for("serve_preview", project=job.project, name=name),
+                        "duration": _trimmed_preview_duration(
+                            sample_path, trim, duration, src_fps)})
+
+    @app.get("/projects/<project>/preview/<name>")
+    def serve_preview(project, name):
+        if secure_filename(name) != name or not name.endswith(".mp4"):
+            abort(404)
+        path = _PREVIEW_DIR / name
+        if not path.exists():
+            abort(404)
+        return send_file(path, conditional=True)
+
+    @app.get("/soundtracks/<name>")
+    def serve_soundtrack(name):
+        """Serve a library track so the project form's Test button can audition
+        it. The name is whitelisted against the actual library listing, which
+        doubles as the path-traversal guard."""
+        if secure_filename(name) != name or name not in set(_list_soundtracks()):
+            abort(404)
+        return send_file(_SOUNDTRACKS_DIR / name, conditional=True)
+
+    @app.post("/soundtracks/<name>/delete")
+    def delete_soundtrack(name):
+        """Remove an uploaded library track. Refuses while any project still
+        references it (checked against the raw config.json so a project with a
+        currently-broken config still counts). Gated by the same password as
+        project deletion."""
+        back = request.referrer or url_for("new_project_form")
+        if secure_filename(name) != name or name not in set(_list_soundtracks()):
+            abort(404)
+        if request.form.get("password", "") != _delete_password():
+            flash("Wrong password - the soundtrack was not deleted.", "error")
+            return redirect(back)
+        users = sorted(
+            project_dir.name
+            for project_dir in all_project_dirs(app.config["INBOX_DIR"])
+            if _raw_soundtrack_name(project_dir) == name
+        )
+        if users:
+            flash(
+                f"'{name}' is still used by: {', '.join(users)}. Change those projects' "
+                f"soundtrack first, then delete it.", "error",
+            )
+            return redirect(back)
+        try:
+            (_SOUNDTRACKS_DIR / name).unlink(missing_ok=True)
+        except OSError as exc:
+            flash(f"Could not delete '{name}': {exc}", "error")
+            return redirect(back)
+        flash(f"Deleted soundtrack '{name}' from the library.", "info")
+        return redirect(back)
+
     return app
+
+
+_KIOSK_PAGE = 8
+
+
+def _kiosk_count(raw) -> int:
+    """Requested kiosk-grid size from ?count= — clamped, defaults to one page."""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return _KIOSK_PAGE
+    return max(_KIOSK_PAGE, min(n, 200))
+
+
+def _guest_or_drive_link(job) -> str | None:
+    """The URL a guest should scan for this clip: the LAN download page when the
+    clip has a token (project uses LAN delivery), else its Google Drive link."""
+    if job.download_token:
+        return f"{lan.public_base_url().rstrip('/')}/d/{job.download_token}"
+    return job.drive_link
+
+
+def _wifi_qr_data_uri() -> str | None:
+    """A 'join this Wi-Fi' QR for kiosk screens, when LAN_SSID is configured."""
+    ssid = lan.wifi_ssid()
+    if not ssid:
+        return None
+    return make_wifi_qr_data_uri(lan.wifi_qr_payload(ssid, lan.wifi_password()))
+
+
+def _raw_soundtrack_name(project_dir: Path) -> str | None:
+    """The bare filename of the soundtrack a project references, read straight
+    from config.json without validation."""
+    try:
+        data = json.loads((project_dir / "config.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    soundtrack = data.get("soundtrack")
+    return Path(soundtrack).name if soundtrack else None
+
+
+def _resolve_secret(inbox_dir: Path) -> str:
+    """Signed session cookies (the operator PIN, guest download PINs) must
+    survive a restart, so a fixed dev-string default won't do once a PIN is in
+    play. Prefer an explicit FLASK_SECRET; otherwise keep a random one on disk
+    next to the SQLite db (that folder already exists and is per-install)."""
+    explicit = os.environ.get("FLASK_SECRET", "").strip()
+    if explicit:
+        return explicit
+    secret_path = inbox_dir / ".glambot" / "secret"
+    try:
+        if secret_path.exists():
+            existing = secret_path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+        secret_path.parent.mkdir(parents=True, exist_ok=True)
+        value = secrets.token_hex(32)
+        secret_path.write_text(value, encoding="utf-8")
+        try:
+            os.chmod(secret_path, 0o600)
+        except OSError:
+            pass
+        return value
+    except OSError:
+        logger.warning("Could not persist a Flask secret at %s - using an ephemeral one", secret_path)
+        return secrets.token_hex(32)
 
 
 def _delete_password() -> str:
@@ -1106,7 +2325,7 @@ def _retry_one_delivery(job: Job, config, store: JobStore, inbox_dir: Path) -> N
     both run the exact same sequence."""
     subject, body = "", ""
     try:
-        raw_subject, raw_body = load_default_template()
+        raw_subject, raw_body = _resolve_email_template(config)
         subject = resolve_placeholders(raw_subject, link="{link}", project=job.project, filename=job.filename)
         body = resolve_placeholders(raw_body, link="{link}", project=job.project, filename=job.filename)
     except Exception:
@@ -1118,20 +2337,65 @@ def _retry_one_delivery(job: Job, config, store: JobStore, inbox_dir: Path) -> N
     )
 
 
-def _import_worker(folder: Path, filenames: list, dest_dir: Path, watcher: InboxWatcher) -> None:
-    """Move selected external files into a project's watch folder, then
-    nudge an immediate rescan. Moving IS the entire import step - no job is
-    created here; the watcher's normal detection (dedup, settle-check,
-    process_job) does the rest, fully reused and unmodified."""
+def _delete_job_files(job: Job) -> None:
+    """Unlink a job's rendered outputs + thumbnails from disk. Leaves the DB
+    row alone - callers decide whether to also store.delete_job()."""
+    for attr in ("output_path", "secondary_output_path", "thumbnail_path"):
+        p = getattr(job, attr, None)
+        if p:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except OSError:
+                pass
+    if job.thumbnail_path and job.output_path:
+        photo = Path(job.thumbnail_path).with_name(Path(job.output_path).stem + "_download.jpg")
+        try:
+            photo.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _import_worker(folder: Path, filenames: list, dest_dir: Path, watcher: InboxWatcher,
+                   decisions: dict, store: JobStore, project: str) -> None:
+    """Move selected external files into a project's watch folder, then nudge
+    an immediate rescan. Each moved file gets a force-import marker so the
+    watcher renders it even if identical footage was already processed - that
+    is the whole point of a hand-picked import. `decisions[name]` is 'rename'
+    or 'replace' when the operator resolved a collision ('skip' files were
+    already filtered out by the caller)."""
     for name in filenames:
         src = folder / name
         if not src.exists():
             continue
+        decision = decisions.get(name, "")
+
+        # Already sitting in the watch folder (the operator browsed to it there
+        # to force a re-render): don't move/rename it - just re-queue in place.
+        if src.resolve() == (dest_dir / name).resolve():
+            store.mark_forced_import(str(src.resolve()))
+            logger.info("Re-queued in place: %s", src)
+            continue
+
+        if decision == "replace":
+            digest = content_hash(src)
+            existing = store.find_by_hash(digest, project) if digest else None
+            if existing is not None:
+                _delete_job_files(existing)
+                store.delete_job(existing.id)
+
         dest = dest_dir / name
         if dest.exists():
-            dest = dest_dir / f"{src.stem}_{uuid4().hex[:8]}{src.suffix}"
+            if decision == "replace":
+                try:
+                    dest.unlink()
+                except OSError:
+                    logger.exception("Could not overwrite %s", dest)
+                    continue
+            else:  # 'rename', or an unresolved collision - keep both
+                dest = dest_dir / f"{src.stem}_{uuid4().hex[:8]}{src.suffix}"
         try:
             shutil.move(str(src), str(dest))
+            store.mark_forced_import(str(dest.resolve()))
             logger.info("Imported %s -> %s", src, dest)
         except OSError:
             logger.exception("Could not import %s", src)
@@ -1174,6 +2438,20 @@ def _compute_project_groups(inbox_dir: Path, store: JobStore) -> list[dict]:
             errors[name] = str(exc)
             groups.setdefault(project_dir, []).append(name)
 
+    # Guest download: which projects expose a guest gallery, and the PIN for
+    # those that have one (for the Projects tab), best-effort.
+    guest_pins: dict[str, str] = {}
+    guest_galleries: set[str] = set()
+    for project_dir in all_project_dirs(inbox_dir):
+        try:
+            cfg = load_config(project_dir)
+        except ConfigError:
+            continue
+        if cfg.lan_delivery or cfg.offline_mode:
+            guest_galleries.add(project_dir.name)
+            if cfg.download_pin:
+                guest_pins[project_dir.name] = cfg.download_pin
+
     result = []
     for folder, projects in groups.items():
         shared = len(projects) > 1
@@ -1184,21 +2462,33 @@ def _compute_project_groups(inbox_dir: Path, store: JobStore) -> list[dict]:
             "projects": sorted(projects),
             "active": active,
             "errors": errors,
+            "guest_pins": guest_pins,
+            "guest_galleries": guest_galleries,
         })
     return sorted(result, key=lambda g: g["folder"])
 
 
-def _project_orientations(inbox_dir: Path) -> list[dict]:
-    """Every valid project's current orientation, for the Clips tab's quick
-    vertical/horizontal switch bar - alphabetical, skips a project with a
-    broken config.json (already surfaced via its Projects-tab Edit link)."""
+def _project_quick_toggles(inbox_dir: Path) -> list[dict]:
+    """Every valid project's current orientation + delivery mode, for the
+    Clips tab's quick switch bar - alphabetical, skips a project with a
+    broken config.json (already surfaced via its Projects-tab Edit link).
+
+    `mode_togglable` is now always True: approval is independent of the
+    delivery channel, so flipping it is unambiguous in every mode. It used to
+    be False for LAN / Offline because auto_deliver was one of four
+    mutually-exclusive modes."""
     items = []
     for project_dir in all_project_dirs(inbox_dir):
         try:
             cfg = load_config(project_dir)
         except ConfigError:
             continue
-        items.append({"name": project_dir.name, "is_vertical": cfg.height > cfg.width})
+        items.append({
+            "name": project_dir.name,
+            "is_vertical": cfg.height > cfg.width,
+            "is_auto": cfg.auto_deliver,
+            "mode_togglable": True,
+        })
     return sorted(items, key=lambda x: x["name"])
 
 
@@ -1211,7 +2501,7 @@ def _list_soundtracks() -> list[str]:
     )
 
 
-def _project_form_kwargs() -> dict:
+def _project_form_kwargs(preview_samples: list | None = None) -> dict:
     """Template kwargs shared by every render of project_form.html (create
     and edit alike), besides mode/error/values which differ per call site."""
     return {
@@ -1222,7 +2512,17 @@ def _project_form_kwargs() -> dict:
         "delivery_modes": DELIVERY_MODES,
         "rotation_choices": ROTATION_CHOICES,
         "existing_soundtracks": _list_soundtracks(),
+        "preview_samples": preview_samples or [],
+        "default_email_subject": _safe_default_template()[0],
+        "default_email_body": _safe_default_template()[1],
     }
+
+
+def _safe_default_template() -> tuple[str, str]:
+    try:
+        return load_default_template()
+    except Exception:
+        return "", ""
 
 
 def _project_values_for_edit(data: dict, project_name: str) -> dict:
@@ -1258,6 +2558,9 @@ def _project_values_for_edit(data: dict, project_name: str) -> dict:
             values["fps_preset"] = "custom"
             values["custom_fps"] = str(fps)
 
+    src_fps = data.get("source_fps")
+    values["source_fps"] = ("%g" % src_fps) if src_fps else ""
+
     def _split_bitrate(bitrate, prefix: str = "") -> None:
         if not bitrate:
             return
@@ -1277,28 +2580,43 @@ def _project_values_for_edit(data: dict, project_name: str) -> dict:
     values["trim_start"] = trim.get("start") or ""
     values["trim_end"] = trim.get("end") or ""
 
-    values["overlay_position"] = data.get("overlay_position", "full")
-    if data.get("overlay_scale") is not None:
-        values["overlay_scale"] = str(data["overlay_scale"])
-    if data.get("overlay_x") is not None:
-        values["overlay_x"] = str(data["overlay_x"])
-    if data.get("overlay_y") is not None:
-        values["overlay_y"] = str(data["overlay_y"])
+    # Orientation-keyed overlay placement, each falling back to the matching
+    # legacy overlay group so an old project pre-fills sensibly.
+    def _overlay_values(prefix: str, *legacy_prefixes: str) -> None:
+        keys = ("position", "scale", "x", "y")
+        chosen = prefix
+        if data.get(f"{prefix}overlay_position") is None and data.get(f"{prefix}overlay_scale") is None:
+            for lp in legacy_prefixes:
+                if any(data.get(f"{lp}overlay_{k}") is not None for k in keys):
+                    chosen = lp
+                    break
+        values[f"{prefix}overlay_position"] = data.get(f"{chosen}overlay_position", "full")
+        for k in ("scale", "x", "y"):
+            v = data.get(f"{chosen}overlay_{k}")
+            if v is not None:
+                values[f"{prefix}overlay_{k}"] = str(v)
 
-    values["second_overlay_position"] = data.get("second_overlay_position", "full")
-    if data.get("second_overlay_scale") is not None:
-        values["second_overlay_scale"] = str(data["second_overlay_scale"])
-    if data.get("second_overlay_x") is not None:
-        values["second_overlay_x"] = str(data["second_overlay_x"])
-    if data.get("second_overlay_y") is not None:
-        values["second_overlay_y"] = str(data["second_overlay_y"])
+    _overlay_values("vertical_", "")
+    _overlay_values("horizontal_", "second_", "")
 
     values["rotation"] = str(data.get("rotation", 0))
     values["position_x"] = str(data.get("position_x", 0))
     values["position_y"] = str(data.get("position_y", 0))
 
-    if data.get("auto_deliver"):
-        values["auto_deliver"] = "on"
+    # The delivery channel and the approval step are independent. Deriving the
+    # radio from auto_deliver (as this used to) meant an offline+auto project
+    # rendered as plain "offline" and lost auto_deliver on the next save.
+    if data.get("offline_mode"):
+        values["mode"] = "offline"
+    elif data.get("lan_delivery"):
+        values["mode"] = "lan"
+    else:
+        values["mode"] = "standard"
+    values["full_automation"] = bool(data.get("auto_deliver"))
+    values["color_profile"] = data.get("color_profile", "camera")
+    values["download_pin"] = data.get("download_pin") or ""
+    values["email_subject"] = data.get("email_subject") or ""
+    values["email_body"] = data.get("email_body") or ""
 
     soundtrack = data.get("soundtrack")
     if soundtrack:
@@ -1314,12 +2632,101 @@ def _project_values_for_edit(data: dict, project_name: str) -> dict:
     values["soundtrack_trim_start"] = soundtrack_trim.get("start") or ""
     values["soundtrack_trim_end"] = soundtrack_trim.get("end") or ""
 
+    grade = data.get("grade") or {}
+    values["exposure"] = str(grade.get("exposure", 0))
+    values["contrast"] = str(grade.get("contrast", 1))
+    values["saturation"] = str(grade.get("saturation", 1))
+    values["white_balance"] = str(grade.get("white_balance", 0))
+    speed_ramp = data.get("speed_ramp") or {}
+    if speed_ramp.get("enabled"):
+        values["speed_ramp_enabled"] = "on"
+        values["speed_ramp_json"] = json.dumps({
+            "points": speed_ramp.get("points", []),
+            "interpolation": speed_ramp.get("interpolation", "smooth"),
+            "smooth_frames": speed_ramp.get("smooth_frames", False),
+            "max_speed": speed_ramp.get("max_speed", 40.0),
+        })
+
     values["source_dir"] = data.get("source_dir") or ""
     values["output_dir"] = data.get("output_dir") or ""
     values["drive_folder_id"] = data.get("drive_folder_id") or ""
     values["playback_background_opacity"] = str(data.get("playback_background_opacity", 50))
 
     return values
+
+
+def _adv_values(config, filename: str) -> dict:
+    """Prefill for the shared advanced-editor macro (templates/_advanced_editor.html)
+    - the clip's *effective* grade + speed ramp (per-clip override if set,
+    else the project default)."""
+    eff_grade = config.grade_for(filename) if config else None
+    eff_ramp = config.speed_ramp_for(filename) if config else None
+    values = {
+        "exposure": eff_grade.exposure if eff_grade else 0,
+        "contrast": eff_grade.contrast if eff_grade else 1,
+        "saturation": eff_grade.saturation if eff_grade else 1,
+        "white_balance": eff_grade.white_balance if eff_grade else 0,
+        "speed_ramp_enabled": "on" if eff_ramp else "",
+        "speed_ramp_json": "",
+    }
+    if eff_ramp:
+        values["speed_ramp_json"] = _ramp_json(eff_ramp)
+
+    # The raw project-level grade + ramp, so the per-clip editor's "Match
+    # project" reset knows what to fall back to (independent of any override).
+    proj_grade = getattr(config, "grade", None) if config else None
+    proj_ramp = getattr(config, "speed_ramp", None) if config else None
+    values["adv_project_json"] = json.dumps({
+        "exposure": proj_grade.exposure if proj_grade else 0,
+        "contrast": proj_grade.contrast if proj_grade else 1,
+        "saturation": proj_grade.saturation if proj_grade else 1,
+        "white_balance": proj_grade.white_balance if proj_grade else 0,
+        "speed_ramp": json.loads(_ramp_json(proj_ramp)) if proj_ramp else None,
+    })
+    return values
+
+
+def _ramp_json(ramp) -> str:
+    return json.dumps({
+        "points": ramp.points,
+        "interpolation": ramp.interpolation,
+        "smooth_frames": ramp.smooth_frames,
+        "max_speed": getattr(ramp, "max_speed", 40.0),
+    })
+
+
+def _trimmed_preview_duration(sample_path: Path, trim, fallback: float | None,
+                              source_fps: float | None = None) -> float | None:
+    """The clip's length after any Basic-settings trim (and raw-footage frame
+    rate reinterpretation) - what the ramp editor's graph should be labelled
+    with. Falls back to the untrimmed length."""
+    from .processor import _effective_duration
+    start = getattr(trim, "start", None) if trim else None
+    end = getattr(trim, "end", None) if trim else None
+    if not start and not end and not source_fps:
+        return fallback
+    try:
+        return _effective_duration(sample_path, start, end, source_fps) or fallback
+    except OSError:
+        return fallback
+
+
+def _delivered_clip_prefill(job: Job, config) -> dict:
+    """Editable recipient / subject / body defaults for re-emailing an
+    already-delivered clip - shared by the /clips page and the review
+    page's Recently Sent list. {link} stays literal (resolved at send)."""
+    subject_default, body_default = "", ""
+    try:
+        raw_subject, raw_body = _resolve_email_template(config)
+        subject_default = resolve_placeholders(raw_subject, link="{link}", project=job.project, filename=job.filename)
+        body_default = resolve_placeholders(raw_body, link="{link}", project=job.project, filename=job.filename)
+    except Exception:
+        pass
+    return {
+        "recipient_default": job.recipient_email or "",
+        "subject_default": subject_default,
+        "body_default": body_default,
+    }
 
 
 def _build_card(job: Job, inbox_dir: Path) -> dict:
@@ -1329,18 +2736,28 @@ def _build_card(job: Job, inbox_dir: Path) -> dict:
     recipient_default = job.recipient_email or ""
     delivery_mode_default = job.delivery_mode or "email"
     config_error = None
+    config = None
     is_vertical = None
+    eff_grade = None
+    project_has_ramp = False
+    ramp_disabled_here = False
+    missing_assets: list[str] = []
     try:
         config = load_config(project_dir)
         recipient_default = job.recipient_email or config.recipient_email
         delivery_mode_default = job.delivery_mode or config.delivery_mode
         is_vertical = config.height > config.width
+        eff_grade = config.grade_for(job.filename)
+        project_has_ramp = config.speed_ramp is not None
+        override = (config.overrides or {}).get(job.filename, {})
+        ramp_disabled_here = "speed_ramp" in override and not override["speed_ramp"].get("enabled", False)
+        missing_assets = list(config.missing_assets)
     except ConfigError as exc:
         config_error = str(exc)
 
     subject_default, body_default = "", ""
     try:
-        raw_subject, raw_body = load_default_template()
+        raw_subject, raw_body = _resolve_email_template(config)
         # {link} is intentionally left unresolved here — the real Drive link
         # doesn't exist until Approve triggers the upload. project/filename
         # are already known, so those get filled in now.
@@ -1360,9 +2777,57 @@ def _build_card(job: Job, inbox_dir: Path) -> dict:
         "body_default": body_default,
         "delivery_mode_default": delivery_mode_default,
         "config_error": config_error,
+        "missing_assets": missing_assets,
         "render_seconds": _render_seconds(job),
         "is_vertical": is_vertical,
+        "adv_exposure": eff_grade.exposure if eff_grade else 0,
+        "adv_contrast": eff_grade.contrast if eff_grade else 1,
+        "adv_saturation": eff_grade.saturation if eff_grade else 1,
+        "adv_white_balance": eff_grade.white_balance if eff_grade else 0,
+        "adv_values": _adv_values(config, job.filename),
+        "project_has_ramp": project_has_ramp,
+        "ramp_disabled_here": ramp_disabled_here,
     }
+
+
+def _migrate_overlay_keys(config_path: Path, data: dict) -> dict:
+    """Rename any legacy `overlay*` / `second_overlay*` keys to the
+    orientation-keyed `vertical_overlay*` / `horizontal_overlay*` form and
+    write the result back. Idempotent - does nothing once migrated. Returns
+    the (possibly updated) dict."""
+    migrated = dict(data)
+    changed = False
+    _suffixes = ("", "_position", "_scale", "_x", "_y")
+    if "overlay" in migrated and "vertical_overlay" not in migrated:
+        for s in _suffixes:
+            if f"overlay{s}" in migrated:
+                migrated[f"vertical_overlay{s}"] = migrated.pop(f"overlay{s}")
+        changed = True
+    if "second_overlay" in migrated and "horizontal_overlay" not in migrated:
+        for s in _suffixes:
+            if f"second_overlay{s}" in migrated:
+                migrated[f"horizontal_overlay{s}"] = migrated.pop(f"second_overlay{s}")
+        changed = True
+    if changed:
+        try:
+            config_path.write_text(json.dumps(migrated, indent=2), encoding="utf-8")
+        except OSError:
+            logger.warning("Could not persist overlay-key migration for %s", config_path)
+            return data
+    return migrated
+
+
+def _resolve_email_template(config) -> tuple[str, str]:
+    """(subject, body) for a project's outgoing emails: the project's own
+    template where set, otherwise the global templates/email_default.txt."""
+    try:
+        subject, body = load_default_template()
+    except Exception:
+        subject, body = "", ""
+    if config is not None:
+        subject = config.email_subject or subject
+        body = config.email_body or body
+    return subject, body
 
 
 def _render_seconds(job: Job) -> float | None:
@@ -1472,6 +2937,91 @@ def _parse_overlay_group_form(form, files, prefix: str):
     return file, updates, None
 
 
+def _parse_advanced_fields(form) -> tuple[dict | None, str | None]:
+    """Parse the Advanced-editing controls (grade + speed ramp) from either the
+    project form or the per-clip override form. Returns
+    ({"grade": <dict|None>, "speed_ramp": <dict|None>}, None) or (None, error)."""
+    try:
+        exposure = float(form.get("exposure", "0") or 0)
+        contrast = float(form.get("contrast", "1") or 1)
+        saturation = float(form.get("saturation", "1") or 1)
+        white_balance = int(float(form.get("white_balance", "0") or 0))
+    except ValueError:
+        return None, "Exposure, contrast, saturation and white balance must be numbers."
+    if not (-5.0 <= exposure <= 5.0 and 0.5 <= contrast <= 2.0
+            and 0.0 <= saturation <= 2.0 and -100 <= white_balance <= 100):
+        return None, ("Exposure (-5..5), contrast (0.5..2), saturation (0..2) or "
+                      "white balance (-100..100) is out of range.")
+    grade = None
+    if (abs(exposure) > 1e-3 or abs(contrast - 1.0) > 1e-3
+            or abs(saturation - 1.0) > 1e-3 or white_balance != 0):
+        grade = {"exposure": round(exposure, 3), "contrast": round(contrast, 3),
+                 "saturation": round(saturation, 3), "white_balance": white_balance}
+
+    speed_ramp = None
+    if form.get("speed_ramp_enabled") == "on":
+        from .effects import DEFAULT_MAX_SPEED, HARD_MAX_SPEED
+        raw = form.get("speed_ramp_json", "").strip()
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return None, "Speed ramp curve data is invalid."
+        points = parsed.get("points") if isinstance(parsed, dict) else parsed
+        if not isinstance(points, list) or len(points) < 2:
+            return None, "The speed ramp needs at least two points."
+
+        # "2" / "4" / "8" / "40" / "custom" + a free number for custom.
+        raw_max = form.get("speed_ramp_max_speed", "").strip()
+        if raw_max == "custom":
+            raw_max = form.get("speed_ramp_max_speed_custom", "").strip()
+        try:
+            max_speed = float(raw_max) if raw_max else DEFAULT_MAX_SPEED
+        except ValueError:
+            return None, "Max speed must be a number."
+        max_speed = max(2.0, min(HARD_MAX_SPEED, max_speed))
+
+        def _pt(p):
+            out = {"t": float(p["t"]), "speed": min(max_speed, max(0.1, float(p["speed"])))}
+            for key in ("hl", "hr"):
+                h = p.get(key)
+                if isinstance(h, (list, tuple)) and len(h) == 2:
+                    out[key] = [float(h[0]), float(h[1])]
+            return out
+        try:
+            clean = sorted((_pt(p) for p in points), key=lambda p: p["t"])
+        except (KeyError, TypeError, ValueError):
+            return None, "Speed ramp points must each have a numeric t and speed."
+        speed_ramp = {
+            "enabled": True,
+            "points": clean,
+            "interpolation": form.get("speed_ramp_interpolation", "smooth"),
+            "smooth_frames": form.get("speed_ramp_smooth_frames") == "on",
+            "max_speed": max_speed,
+        }
+    return {"grade": grade, "speed_ramp": speed_ramp}, None
+
+
+def _project_footage_files(inbox_dir: Path, project: str) -> list[str]:
+    """Footage filenames available to preview for a project - both freshly
+    dropped clips and already-archived originals."""
+    project_dir = inbox_dir / project
+    if not (project_dir / "config.json").exists():
+        return []
+    try:
+        config = load_config(project_dir)
+    except ConfigError:
+        config = None
+    dirs = [project_watch_dirs(inbox_dir).get(project, project_dir)]
+    from .processor import resolve_output_base
+    if config is not None:
+        dirs.append(resolve_output_base(project_dir, config) / "Footage")
+    names: set[str] = set()
+    for d in dirs:
+        if d and d.is_dir():
+            names.update(p.name for p in d.iterdir() if p.is_file() and is_footage_file(p))
+    return sorted(names)
+
+
 def _parse_optional_db(raw: str, name: str) -> tuple[float | None, str | None]:
     raw = raw.strip()
     if not raw:
@@ -1504,6 +3054,16 @@ def _parse_project_form(req):
     if fps_error:
         return None, fps_error
 
+    raw_source_fps = form.get("source_fps", "").strip()
+    source_fps = None
+    if raw_source_fps:
+        try:
+            source_fps = float(raw_source_fps)
+        except ValueError:
+            return None, "Source frame rate must be a number."
+        if not (0 < source_fps <= 1000):
+            return None, "Source frame rate must be between 0 and 1000."
+
     bitrate, bitrate_error = _parse_bitrate(form)
     if bitrate_error:
         return None, bitrate_error
@@ -1524,8 +3084,12 @@ def _parse_project_form(req):
     trim_start = form.get("trim_start", "").strip()
     trim_end = form.get("trim_end", "").strip()
 
-    # Overlay is optional — no file uploaded means no overlay.
-    overlay_file, overlay_updates, err = _parse_overlay_group_form(form, req.files, "")
+    # Overlays are optional and keyed by orientation - the renderer picks the
+    # one matching each output's aspect ratio.
+    vertical_overlay_file, vertical_overlay_updates, err = _parse_overlay_group_form(form, req.files, "vertical_")
+    if err:
+        return None, err
+    horizontal_overlay_file, horizontal_overlay_updates, err = _parse_overlay_group_form(form, req.files, "horizontal_")
     if err:
         return None, err
 
@@ -1565,8 +3129,28 @@ def _parse_project_form(req):
         except ValueError:
             return None, "Position Y must be a whole number of pixels."
 
-    # --- Full automation --------------------------------------------------
-    auto_deliver = form.get("auto_deliver") == "on"
+    # --- Delivery channel, and separately whether a human approves --------
+    # The radio picks WHERE clips go; the checkbox picks WHETHER anyone has to
+    # approve them. These used to be one four-way exclusive choice, which made
+    # "offline AND fully automatic" impossible to express - and silently reset
+    # auto_deliver to False every time an offline project was saved.
+    mode = form.get("mode", "standard")
+    if mode not in {"standard", "auto", "lan", "offline"}:
+        return None, "Invalid mode selection."
+    # Legacy: "auto" was standard delivery with no approval step.
+    auto_deliver = bool(form.get("full_automation")) or mode == "auto"
+    if mode == "auto":
+        mode = "standard"
+    lan_delivery = mode == "lan"
+    offline_mode = mode == "offline"
+    color_profile = (form.get("color_profile") or "camera").strip().lower()
+    if color_profile not in VALID_COLOR_PROFILES:
+        return None, "Invalid colour profile."
+    # The guest download PIN is optional for the Wi-Fi / offline modes: blank
+    # means guests download with no PIN prompt. Only the format is enforced.
+    download_pin = form.get("download_pin", "").strip() or None
+    if download_pin and not re.match(r"^\d{4,8}$", download_pin):
+        return None, "The guest download PIN must be 4-8 digits (or leave it blank)."
 
     # --- Soundtrack ---------------------------------------------------
     soundtrack_choice = form.get("soundtrack_choice", "")
@@ -1593,12 +3177,12 @@ def _parse_project_form(req):
     soundtrack_trim_start = form.get("soundtrack_trim_start", "").strip()
     soundtrack_trim_end = form.get("soundtrack_trim_end", "").strip()
 
-    # --- Dual-resolution export (+ its own optional overlay) --------------
+    # --- Dual-resolution export -----------------------------------------
+    # The second resolution reuses whichever orientation overlay matches it -
+    # no separate overlay controls any more.
     second_resolution_enabled = form.get("second_resolution_enabled") == "on"
     second_resolution = None
     second_bitrate = None
-    second_overlay_file = None
-    second_overlay_updates: dict = {}
     if second_resolution_enabled:
         second_res = _parse_resolution(form, prefix="second_")
         if second_res is None:
@@ -1615,10 +3199,6 @@ def _parse_project_form(req):
             second_bitrate = sb_preset
         elif sb_preset != "":
             return None, "Invalid second bitrate selection."
-
-        second_overlay_file, second_overlay_updates, err = _parse_overlay_group_form(form, req.files, "second_")
-        if err:
-            return None, err
 
     # --- Custom footage source folder ------------------------------------
     source_dir_raw = form.get("source_dir", "").strip()
@@ -1661,10 +3241,15 @@ def _parse_project_form(req):
         "aspect_ratio": _aspect_ratio_label(width, height),
         "trim": {k: v for k, v in (("start", trim_start), ("end", trim_end)) if v},
         "fps": fps,
+        "source_fps": source_fps,
         "rotation": rotation,
         "position_x": position_x if position_x is not None else 0,
         "position_y": position_y if position_y is not None else 0,
         "auto_deliver": auto_deliver,
+        "lan_delivery": lan_delivery,
+        "offline_mode": offline_mode,
+        "download_pin": download_pin,
+        "color_profile": color_profile,
         "soundtrack_volume_db": soundtrack_volume_db if soundtrack_volume_db is not None else 0.0,
         "original_volume_db": original_volume_db if original_volume_db is not None else 0.0,
         "soundtrack_trim": {
@@ -1680,8 +3265,19 @@ def _parse_project_form(req):
     # Overlay position/scale/x/y are saved even without a new upload, so an
     # existing overlay's placement can be nudged/resized on its own (edit
     # mode). Harmless on create with no overlay — the keys just go unused.
-    data.update(overlay_updates)
-    data.update(second_overlay_updates)
+    data.update(vertical_overlay_updates)
+    data.update(horizontal_overlay_updates)
+
+    advanced, adv_error = _parse_advanced_fields(form)
+    if adv_error:
+        return None, adv_error
+    data["grade"] = advanced["grade"]
+    data["speed_ramp"] = advanced["speed_ramp"]
+
+    # Per-project email template (blank clears it, back to email_default.txt).
+    data["email_subject"] = form.get("email_subject", "").strip() or None
+    data["email_body"] = form.get("email_body", "") or None
+
     # soundtrack: an explicit "None" selection clears it; an existing-file
     # choice sets it; "__upload__" is left for the caller to fill in once the
     # uploaded file is actually saved to disk.
@@ -1692,8 +3288,10 @@ def _parse_project_form(req):
 
     return {
         "data": data,
-        "overlay_file": overlay_file,
-        "second_overlay_file": second_overlay_file,
+        "vertical_overlay_file": vertical_overlay_file,
+        "horizontal_overlay_file": horizontal_overlay_file,
+        "vertical_overlay_remove": form.get("vertical_overlay_remove") == "on",
+        "horizontal_overlay_remove": form.get("horizontal_overlay_remove") == "on",
         "soundtrack_file": soundtrack_file,
         "background_file": background_file,
         "name": name,

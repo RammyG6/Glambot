@@ -4,16 +4,8 @@
 <meta charset="utf-8">
 <title>Glambot — Email a delivered clip</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-<style>
-  body { max-width: none; padding: 0; margin: 0; }
-  @media (max-width: 900px) {
-    .sidebar { position: static; height: auto; width: 100% !important; }
-    .app-shell { flex-direction: column; }
-    .main { padding: 1.5rem 1.25rem 3rem; }
-  }
-</style>
 </head>
-<body>
+<body class="page-full">
 <div class="app-shell">
   {% set nav_mode = 'links' %}
   {% set active_tab = 'clips' %}
@@ -30,6 +22,36 @@
         <div class="flash {{ category }}">{{ message }}</div>
       {% endfor %}
     {% endwith %}
+
+    {% if template_projects %}
+      <div class="card" id="tmplPanel">
+        <div class="card-title">Email templates</div>
+        <p class="field-hint">A project's own subject / message for email delivery. Placeholders: <code>{{ '{link}' }}</code>, <code>{{ '{link2}' }}</code>, <code>{{ '{project}' }}</code>, <code>{{ '{filename}' }}</code>. Leave blank to use the global default.</p>
+        <form method="post" id="tmplForm" action="{{ url_for('save_email_template', project=template_projects[0].name) }}" style="margin-top:.7rem">
+          <div class="field">
+            <label for="tmplProject">Project</label>
+            <select id="tmplProject">
+              {% for p in template_projects %}<option value="{{ p.name }}">{{ p.name }}</option>{% endfor %}
+            </select>
+          </div>
+          <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin:.3rem 0 .6rem">
+            <button type="button" class="btn btn-secondary btn-sm" id="tmplToggle">Hide fields</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="tmplClear">Clear template</button>
+          </div>
+          <div id="tmplFields">
+            <div class="field">
+              <label for="tmplSubject">Subject</label>
+              <input type="text" id="tmplSubject" name="email_subject" placeholder="{{ default_email_subject }}">
+            </div>
+            <div class="field">
+              <label for="tmplBody">Message</label>
+              <textarea id="tmplBody" name="email_body" rows="7" placeholder="{{ default_email_body }}"></textarea>
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary">Save template</button>
+        </form>
+      </div>
+    {% endif %}
 
     {% if not cards %}
       <p class="empty">No delivered clips yet.</p>
@@ -88,6 +110,41 @@
       var collapsed = !sidebar.classList.contains('collapsed');
       localStorage.setItem('glambot-sidebar-collapsed', collapsed ? 'yes' : 'no');
       render(collapsed);
+    });
+  })();
+
+  // --- Email templates panel ---
+  (function () {
+    var form = document.getElementById('tmplForm');
+    if (!form) return;
+    var sel = document.getElementById('tmplProject');
+    var subject = document.getElementById('tmplSubject');
+    var body = document.getElementById('tmplBody');
+    var fields = document.getElementById('tmplFields');
+    var toggle = document.getElementById('tmplToggle');
+    var clearBtn = document.getElementById('tmplClear');
+    var TEMPLATES = {{ template_projects | tojson }};
+    var byName = {};
+    TEMPLATES.forEach(function (p) { byName[p.name] = p; });
+
+    function load(name) {
+      var p = byName[name] || { email_subject: '', email_body: '' };
+      subject.value = p.email_subject || '';
+      body.value = p.email_body || '';
+      form.action = '/projects/' + encodeURIComponent(name) + '/email-template';
+    }
+    sel.addEventListener('change', function () { load(sel.value); });
+    load(sel.value);
+
+    toggle.addEventListener('click', function () {
+      var hidden = !fields.classList.contains('hidden');
+      fields.classList.toggle('hidden', hidden);
+      toggle.textContent = hidden ? 'Show fields' : 'Hide fields';
+    });
+    clearBtn.addEventListener('click', function () { subject.value = ''; body.value = ''; });
+
+    form.addEventListener('submit', function (ev) {
+      if (!window.confirm("Save this project's email template?")) ev.preventDefault();
     });
   })();
 </script>

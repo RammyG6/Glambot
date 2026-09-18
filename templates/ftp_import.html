@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glambot — FTP import</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  .ftp-status-row { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
+  .ftp-status-row form { margin: 0; }
+  .ftp-status-row .btn { margin-top: 0; } /* undo the global form>.btn top margin so the button lines up with the pill */
+  .ftp-pill { display: inline-flex; align-items: center; gap: .4rem; font-weight: 600;
+              font-size: var(--fs-xs); padding: .4rem .8rem; border-radius: var(--radius-pill);
+              border: 1px solid var(--border); white-space: nowrap; }
+  .ftp-pill.on  { color: var(--success); border-color: rgba(48,209,88,.35); background: var(--success-bg); }
+  .ftp-pill.off { color: var(--text-secondary); }
+  .ftp-dot { width: .55rem; height: .55rem; border-radius: 50%; background: currentColor; }
+  .ftp-row-hint { font-size: var(--fs-xs); color: var(--text-secondary); margin: .5rem 0 0; }
+  .ftp-kv { display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1rem;
+            font-size: var(--fs-base); margin-top: .8rem; }
+  .ftp-kv dt { color: var(--text-secondary); }
+  .ftp-kv dd { margin: 0; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .ftp-kv dd .hint { font-family: inherit; color: var(--text-secondary); font-size: .82rem; }
+  .ftp-boxes { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+               gap: 1rem; margin-top: .9rem; }
+  .ftp-box { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .6rem .8rem; }
+  .ftp-box-head { display: flex; align-items: center; justify-content: space-between;
+                  font-size: .8rem; font-weight: 600; color: var(--text-secondary); margin-bottom: .4rem; }
+  .ftp-list { font-size: .82rem; font-family: ui-monospace, Menlo, Consolas, monospace;
+              max-height: 200px; overflow-y: auto; }
+  .ftp-list div { padding: .12rem 0; }
+  .ftp-list .up { color: var(--success); }
+  .ftp-list .muted { color: var(--text-secondary); font-family: inherit; }
+  .ftp-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+                   gap: .3rem 1rem; align-items: start; }
+  .ftp-form .field { margin-bottom: .9rem; }
+  .ftp-warn { border: 1px solid rgba(224,163,58,.35); background: var(--warning-bg); border-radius: var(--radius-sm);
+              padding: .7rem .9rem; margin-top: .8rem; font-size: var(--fs-base); }
+  .ftp-warn .btn { margin-top: .5rem; }
+  code.cmd { display: block; white-space: pre-wrap; word-break: break-all; margin-top: .4rem;
+             padding: .5rem .7rem; background: var(--bg-subtle); border-radius: var(--radius-sm); font-size: var(--fs-xs); }
+  .modal-backdrop[hidden] { display: none !important; }
+  .ftp-warn[hidden] { display: none !important; }
+  .modal-card p { font-size: var(--fs-base); color: var(--text-secondary); }
+  .modal-actions { display: flex; gap: .75rem; justify-content: flex-end; margin-top: 1rem; }
+</style>
+</head>
+<body class="page-full">
+<div class="app-shell">
+  {% set nav_mode = 'links' %}
+  {% set active_tab = 'ftp' %}
+  {% include '_sidebar.html' %}
+
+  <div class="main">
+    <div class="main-head">
+      <h1>FTP import</h1>
+    </div>
+    <p class="main-sub">Built-in FTP server for auto-importing footage straight off a camera
+      (e.g. a Sony FX6's FTP push). Files land in the folder you choose below; point a
+      project's <em>footage source folder</em> at that same folder and clips are processed
+      automatically. Replaces running a separate FileZilla Server.</p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+
+    {% if not available %}
+      <div class="ftp-warn">The FTP server component isn't available in this build — settings
+        can be saved but the server can't be started here.</div>
+    {% endif %}
+
+    <div class="card">
+      <div class="card-title">Server status</div>
+      <div class="ftp-status-row">
+        <span class="ftp-pill {{ 'on' if status.running else 'off' }}" id="ftpPill">
+          <span class="ftp-dot"></span><span id="ftpPillText">{{ 'Running' if status.running else 'Stopped' }}</span>
+        </span>
+        {% if status.running %}
+          <form method="post" action="{{ url_for('ftp_import_stop') }}">
+            <button type="submit" class="btn btn-secondary btn-sm">Stop</button>
+          </form>
+        {% else %}
+          <form method="post" action="{{ url_for('ftp_import_start') }}">
+            <button type="submit" class="btn btn-primary btn-sm">Start</button>
+          </form>
+        {% endif %}
+      </div>
+      <p class="ftp-row-hint">Auto-starts with Glambot while running. Connected now:
+        <span id="ftpSessions">{{ status.sessions }}</span>.</p>
+
+      <div class="ftp-boxes">
+        <div class="ftp-box">
+          <div class="ftp-box-head"><span>Connected clients</span></div>
+          <div class="ftp-list" id="ftpClients">
+            {% for c in status.clients %}
+              <div>{{ c.ip }} <span class="muted">×{{ c.connections }}</span></div>
+            {% else %}
+              <div class="muted">No cameras have connected yet.</div>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="ftp-box">
+          <div class="ftp-box-head">
+            <span>Uploads this session (<span id="ftpUploads">{{ status.uploads_total }}</span>)</span>
+            <form method="post" action="{{ url_for('ftp_import_open_folder') }}">
+              <button type="submit" class="btn btn-ghost btn-sm">View</button>
+            </form>
+          </div>
+          <div class="ftp-list" id="ftpUploadList">
+            {% for u in status.uploads %}
+              <div class="up">{{ u.name }}{% if u.bytes %} <span class="muted">{{ (u.bytes / 1048576) | round(1) }} MB</span>{% endif %}</div>
+            {% else %}
+              <div class="muted">No uploads yet.</div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+
+      <div id="ftpFirewallWarn" class="ftp-warn" {{ '' if (status.firewall_state not in ('ok', 'unsupported')) else 'hidden' }}>
+        <strong>Windows Firewall isn't allowing camera connections yet.</strong>
+        <div>Glambot can add an inbound rule for TCP {{ status.port }} and the passive data
+          ports. This needs one Windows permission prompt.</div>
+        <form method="post" action="{{ url_for('ftp_import_firewall_apply') }}">
+          <button type="submit" class="btn btn-primary btn-sm">Apply firewall rule</button>
+        </form>
+        <details style="margin-top:.5rem">
+          <summary style="cursor:pointer;font-size:.82rem">Or run this manually as administrator</summary>
+          <code class="cmd">{{ status.firewall_command }}</code>
+        </details>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Camera setup</div>
+      <p class="field-hint">Enter these in your camera's FTP client / transfer profile.</p>
+      <dl class="ftp-kv">
+        <dt>Host / IP</dt>
+        <dd id="camHost">{{ status.connect_host }}
+          {% if status.passive_host %}<span class="hint">(manual override)</span>{% endif %}</dd>
+        <dt>Port</dt><dd id="camPort">{{ status.port }}</dd>
+        <dt>Username</dt><dd id="camUser">{{ 'anonymous' if status.anonymous else status.username }}</dd>
+        <dt>Password</dt><dd id="camPass">{{ '(blank)' if status.anonymous else '(as set below)' }}</dd>
+        <dt>Transfer mode</dt><dd>Passive (PASV)</dd>
+        <dt>Upload directory</dt><dd>/</dd>
+      </dl>
+      <p class="field-hint">The named account <code id="camUser2">{{ status.username }}</code>
+        also works for cameras that require a login — and so does leaving the camera's
+        username blank.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Settings</div>
+      <form method="post" action="{{ url_for('ftp_import_save') }}" class="ftp-form">
+        <div class="field">
+          <label for="root_dir">Import folder</label>
+          <div style="display:flex;gap:.6rem;flex-wrap:wrap">
+            <input type="text" id="root_dir" name="root_dir" value="{{ settings.root_dir }}"
+                   style="flex:1 1 320px" placeholder="D:\GlambotAuto_Import">
+            <button type="button" class="btn btn-secondary btn-sm" id="pickFolderBtn">Choose folder…</button>
+          </div>
+          <p class="field-hint">Where camera uploads are written. Point a project's footage
+            source folder here (Projects → Edit → Footage source).</p>
+          {% if not root_exists %}
+            <div class="ftp-warn">This folder doesn't exist yet.
+              <button type="submit" form="createRootForm" class="btn btn-secondary btn-sm">Create it</button>
+            </div>
+          {% endif %}
+        </div>
+
+        <div class="ftp-form-grid">
+          <div class="field">
+            <label for="port">Port</label>
+            <input type="number" id="port" name="port" value="{{ settings.port }}" min="1" max="65535">
+            <p class="field-hint">Default 2121 (below 1024 needs admin on Windows).</p>
+          </div>
+          <div class="field">
+            <label for="passive_ports">Passive port range</label>
+            <input type="text" id="passive_ports" name="passive_ports" value="{{ settings.passive_ports }}">
+            <p class="field-hint">Data-connection ports opened for passive transfers.</p>
+          </div>
+          <div class="field">
+            <label for="passive_host">Server address the camera connects to</label>
+            <input type="text" id="passive_host" name="passive_host" value="{{ settings.passive_host }}"
+                   placeholder="{{ status.lan_ip }}">
+            <p class="field-hint">Override. Blank = auto-detected LAN IP ({{ status.lan_ip }}).</p>
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="checkbox-label"><input type="checkbox" name="anonymous" {{ 'checked' if settings.anonymous }}> Allow anonymous upload</label>
+          <p class="field-hint">Simplest for a dedicated camera↔PC network. The named account
+            below is always accepted too.</p>
+        </div>
+        <div class="ftp-form-grid">
+          <div class="field">
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" value="{{ settings.username }}" autocomplete="off" placeholder="glambot">
+            <p class="field-hint">Blank resolves to <code>glambot</code>.</p>
+          </div>
+          <div class="field">
+            <label for="password">Password</label>
+            <input type="text" id="password" name="password" value="{{ settings.password }}" autocomplete="off">
+          </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Save settings</button>
+        {% if status.running %}<span class="field-hint" style="margin-left:.6rem">Saving restarts the running server.</span>{% endif %}
+      </form>
+      <form method="post" action="{{ url_for('ftp_import_create_root') }}" id="createRootForm"></form>
+    </div>
+  </div>
+</div>
+
+<div id="ftpFwModal" class="modal-backdrop" {{ '' if (status.running and status.firewall_state not in ('ok', 'unsupported')) else 'hidden' }}>
+  <div class="modal-card">
+    <h2>Allow camera connections through Windows Firewall?</h2>
+    <p>The FTP server is running but Windows Firewall isn't allowing inbound
+      connections on its ports yet, so a camera on the network can't reach it.
+      Glambot can add the rule — Windows will ask you to confirm once.</p>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost btn-sm" id="ftpFwDismiss">Not now</button>
+      <form method="post" action="{{ url_for('ftp_import_firewall_apply') }}">
+        <button type="submit" class="btn btn-primary btn-sm">Adjust now</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var pickBtn = document.getElementById('pickFolderBtn');
+  var rootInput = document.getElementById('root_dir');
+  if (pickBtn) {
+    pickBtn.addEventListener('click', function () {
+      var body = new FormData();
+      body.append('kind', 'folder');
+      body.append('initial', rootInput.value.trim());
+      pickBtn.disabled = true;
+      fetch('{{ url_for("pick") }}', { method: 'POST', body: body })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.ok && data.path) { rootInput.value = data.path; }
+          else if (data.reason === 'unsupported') {
+            alert('The folder picker only works on the Glambot PC — type the path instead.');
+          }
+        })
+        .catch(function () {})
+        .then(function () { pickBtn.disabled = false; });
+    });
+  }
+
+  var modal = document.getElementById('ftpFwModal');
+  var modalDismissed = false;
+  try { modalDismissed = sessionStorage.getItem('ftpFwDismissed') === '1'; } catch (e) {}
+  if (modalDismissed) { modal.hidden = true; }
+  document.getElementById('ftpFwDismiss').addEventListener('click', function () {
+    modalDismissed = true;
+    try { sessionStorage.setItem('ftpFwDismissed', '1'); } catch (e) {}
+    modal.hidden = true;
+  });
+  // "Adjust now" acts on the problem - let the prompt return next load if it
+  // still isn't fixed.
+  var fwForm = modal.querySelector('form');
+  if (fwForm) { fwForm.addEventListener('submit', function () {
+    try { sessionStorage.removeItem('ftpFwDismissed'); } catch (e) {}
+  }); }
+
+  function setText(id, val) { var el = document.getElementById(id); if (el && val != null) el.textContent = val; }
+
+  function poll() {
+    fetch('{{ url_for("ftp_import_status") }}', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (!s.available) { return; }
+        var pill = document.getElementById('ftpPill');
+        pill.className = 'ftp-pill ' + (s.running ? 'on' : 'off');
+        setText('ftpPillText', s.running ? 'Running' : 'Stopped');
+        setText('ftpSessions', s.sessions);
+        setText('ftpUploads', s.uploads_total);
+
+        // Camera setup card - keep live after a save+restart.
+        setText('camHost', s.connect_host + (s.passive_host ? '  (manual override)' : ''));
+        setText('camPort', s.port);
+        setText('camUser', s.anonymous ? 'anonymous' : s.username);
+        setText('camPass', s.anonymous ? '(blank)' : '(as set below)');
+        setText('camUser2', s.username);
+
+        var cl = document.getElementById('ftpClients');
+        if (s.clients && s.clients.length) {
+          cl.innerHTML = s.clients.map(function (c) {
+            return '<div>' + c.ip + ' <span class="muted">×' + c.connections + '</span></div>';
+          }).join('');
+        }
+        var ul = document.getElementById('ftpUploadList');
+        if (s.uploads && s.uploads.length) {
+          ul.innerHTML = s.uploads.map(function (u) {
+            var mb = u.bytes ? ' <span class="muted">' + (u.bytes / 1048576).toFixed(1) + ' MB</span>' : '';
+            return '<div class="up">' + u.name + mb + '</div>';
+          }).join('');
+        }
+
+        var fwOk = (s.firewall_state === 'ok' || s.firewall_state === 'unsupported');
+        var warn = document.getElementById('ftpFirewallWarn');
+        if (warn) warn.hidden = fwOk;
+        if (s.running && !fwOk && !modalDismissed) { modal.hidden = false; }
+        if (fwOk) { modal.hidden = true; }
+      })
+      .catch(function () {});
+  }
+  setInterval(poll, 3000);
+  poll();
+})();
+</script>
+</body>
+</html>

@@ -59,6 +59,10 @@ _NEW_COLUMNS = [
     # column existed - the review UI shows "-" for those rather than
     # backfilling.
     ("duration_seconds", "REAL"),
+    # Unguessable token for the guest LAN download URL (/d/<token>). NULL until
+    # a project with lan_delivery on delivers the clip. See glambot/lan.py.
+    ("download_token", "TEXT"),
+    ("lan_download_count", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -70,10 +74,35 @@ CREATE TABLE IF NOT EXISTS folder_ownership (
 );
 """
 
+# Which clip the kiosk screen should pin to, and whether playback is paused -
+# both operator-controlled from the /remote touch page. Orthogonal to job
+# `status`; never moves or deletes anything.
+_KIOSK_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS kiosk_state (
+    project TEXT PRIMARY KEY,
+    live_job_id INTEGER,
+    paused INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+"""
+
+# One-shot markers dropped by the "Import existing footage" page so the watcher
+# renders that exact file even when identical footage was already processed for
+# the project. Consumed (deleted) by watcher._process_path() the first time it
+# sees the file; see JobStore.take_forced_import().
+_FORCED_IMPORTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS forced_imports (
+    source_path TEXT PRIMARY KEY,
+    created_at  TEXT NOT NULL
+);
+"""
+
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_SCHEMA)
     conn.execute(_FOLDER_OWNERSHIP_SCHEMA)
+    conn.execute(_KIOSK_STATE_SCHEMA)
+    conn.execute(_FORCED_IMPORTS_SCHEMA)
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
     for name, ddl in _NEW_COLUMNS:
         if name not in existing:
@@ -108,6 +137,8 @@ class Job:
     content_hash: Optional[str] = None
     hidden_from_kiosk: int = 0
     duration_seconds: Optional[float] = None
+    download_token: Optional[str] = None
+    lan_download_count: int = 0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Job":
@@ -175,6 +206,22 @@ class JobStore:
                 (content_hash, project),
             ).fetchone()
         return Job.from_row(row) if row else None
+
+    def get_job_by_token(self, token: str) -> Optional[Job]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE download_token = ?", (token,)
+            ).fetchone()
+        return Job.from_row(row) if row else None
+
+    def bump_lan_download(self, job_id: int) -> None:
+        """Cheap counter increment (like set_progress) - not worth churning the
+        whole row / updated_at for a download tally."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE jobs SET lan_download_count = lan_download_count + 1 WHERE id = ?",
+                (job_id,),
+            )
 
     def list_jobs(self, status: Optional[str] = None, project: Optional[str] = None) -> list[Job]:
         query = "SELECT * FROM jobs"
@@ -259,6 +306,11 @@ class JobStore:
             fields["secondary_drive_link"] = secondary_drive_link
         return self.update_job(job_id, **fields)
 
+    def delete_job(self, job_id: int) -> None:
+        """Drop a single job row. Files on disk are the caller's responsibility."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
     def delete_jobs_for_project(self, project: str) -> int:
         """Drop this project's job history. Returns how many rows went.
 
@@ -276,6 +328,71 @@ class JobStore:
         with self._connect() as conn:
             conn.execute("DELETE FROM jobs WHERE project = ?", (project,))
             conn.execute("DELETE FROM folder_ownership WHERE active_project = ?", (project,))
+
+    def mark_forced_import(self, source_path: str) -> None:
+        """Record that `source_path` was hand-picked on the Import page, so the
+        watcher renders it even if identical footage was already processed for
+        the project. One-shot: cleared by take_forced_import()."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO forced_imports (source_path, created_at) VALUES (?, ?)",
+                (source_path, _now()),
+            )
+
+    def has_forced_import(self, source_path: str) -> bool:
+        """Whether a force-render marker is pending for this path. A peek - does
+        NOT consume it; take_forced_import() does the one-shot consume when the
+        watcher actually renders."""
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT 1 FROM forced_imports WHERE source_path = ?", (source_path,)
+            ).fetchone() is not None
+
+    def take_forced_import(self, source_path: str) -> bool:
+        """Return whether `source_path` has a pending force-render marker,
+        consuming it in the same step so it only ever applies once."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM forced_imports WHERE source_path = ?", (source_path,)
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute("DELETE FROM forced_imports WHERE source_path = ?", (source_path,))
+            return True
+
+    def prune_forced_imports(self, max_age_hours: int = 24) -> None:
+        """Drop markers whose file never landed, so they can't accumulate or
+        force-render a much-later, unrelated file that happens to reuse the path."""
+        cutoff = datetime.now(timezone.utc).timestamp() - max_age_hours * 3600
+        with self._connect() as conn:
+            rows = conn.execute("SELECT source_path, created_at FROM forced_imports").fetchall()
+            stale = [
+                r["source_path"] for r in rows
+                if datetime.fromisoformat(r["created_at"]).timestamp() < cutoff
+            ]
+            for path in stale:
+                conn.execute("DELETE FROM forced_imports WHERE source_path = ?", (path,))
+
+    def get_kiosk_state(self, project: str) -> dict:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT live_job_id, paused FROM kiosk_state WHERE project = ?", (project,)
+            ).fetchone()
+        if row is None:
+            return {"live_job_id": None, "paused": False}
+        return {"live_job_id": row["live_job_id"], "paused": bool(row["paused"])}
+
+    def set_kiosk_state(self, project: str, live_job_id: Optional[int], paused: bool) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO kiosk_state (project, live_job_id, paused, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(project) DO UPDATE SET
+                       live_job_id = excluded.live_job_id,
+                       paused = excluded.paused,
+                       updated_at = excluded.updated_at""",
+                (project, live_job_id, 1 if paused else 0, _now()),
+            )
 
     def get_active_project(self, folder_path: str) -> Optional[str]:
         with self._connect() as conn:

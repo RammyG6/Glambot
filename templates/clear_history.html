@@ -5,15 +5,15 @@
 <title>Glambot &mdash; Clear history</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <style>
-  body { max-width: 640px; margin: 3rem auto; padding: 0 1.5rem 3rem; }
-  .count { font-size: 2rem; font-weight: 600; }
-  .note { color: var(--text-secondary); font-size: .9rem; }
+  body { margin: 3rem auto; padding: 0 1.5rem 3rem; }
+  .count { font-size: var(--fs-2xl); font-weight: 600; }
+  .note { color: var(--text-secondary); font-size: var(--fs-base); }
   .actions { display: flex; gap: .75rem; align-items: center; margin-top: 1.5rem; }
-  .job-list { list-style: none; padding: 0; margin: 1rem 0 0; max-height: 220px; overflow-y: auto; font-size: .85rem; color: var(--text-secondary); }
+  .job-list { list-style: none; padding: 0; margin: 1rem 0 0; max-height: 220px; overflow-y: auto; font-size: var(--fs-sm); color: var(--text-secondary); }
   .job-list li { padding: .3rem 0; border-bottom: 1px solid var(--border); }
 </style>
 </head>
-<body>
+<body class="page">
   <h1>Clear history for &ldquo;{{ project }}&rdquo;?</h1>
 
   <div class="panel">

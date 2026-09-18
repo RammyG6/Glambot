@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glambot — Phantom Import</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  .cam-row { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
+  .cam-row form { margin: 0; }
+  .cam-row .btn { margin-top: 0; } /* undo the global form>.btn top margin so buttons line up with the pill/badge */
+  .cam-pill { display: inline-flex; align-items: center; gap: .4rem; font-weight: 600;
+              font-size: var(--fs-xs); padding: .4rem .8rem; border-radius: var(--radius-pill);
+              border: 1px solid var(--border); white-space: nowrap; }
+  .cam-pill.on  { color: var(--success); border-color: rgba(48,209,88,.35); background: var(--success-bg); }
+  .cam-pill.off { color: var(--text-secondary); }
+  .cam-dot { width: .55rem; height: .55rem; border-radius: 50%; background: currentColor; }
+  .cam-badge { font-weight: 700; font-size: var(--fs-xs); padding: .4rem .8rem; border-radius: var(--radius-sm);
+               border: 1px solid var(--border); letter-spacing: .04em; }
+  .cam-badge.recording { color: var(--danger); border-color: rgba(255,69,58,.4); background: var(--danger-bg); }
+  .cam-badge.stored    { color: var(--success); border-color: rgba(48,209,88,.35); background: var(--success-bg); }
+  .cam-badge.ready     { color: var(--text-secondary); }
+  /* Couldn't be refreshed (the camera port is busy) - don't present it as live. */
+  .cam-badge.stale     { opacity: .45; font-style: italic; }
+  .cam-parts { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .8rem; }
+  .cam-part { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .4rem .7rem;
+              font-size: var(--fs-xs); min-width: 5.5rem; text-align: center; }
+  .cam-part .n { color: var(--text-secondary); display: block; font-size: .7rem; }
+  .cam-part.recording { border-color: rgba(255,69,58,.4); color: var(--danger); }
+  .cam-part.stored { border-color: rgba(48,209,88,.35); color: var(--success); }
+  .cam-part.downloaded { opacity: .55; }
+  /* Operator stopped this one: still on the camera, but the auto-poll won't take it. */
+  .cam-part.skipped { border-style: dashed; color: var(--text-secondary); }
+  .cam-kv { display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1rem;
+            font-size: var(--fs-base); margin-top: .6rem; }
+  .cam-kv dt { color: var(--text-secondary); }
+  .cam-kv dd { margin: 0; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .cam-progress { height: .5rem; border-radius: var(--radius-pill); background: var(--bg-subtle); overflow: hidden; margin-top: .5rem; }
+  .cam-progress > span { display: block; height: 100%; background: var(--accent, #3b82f6); width: 0; transition: width .3s; }
+  .cam-list { font-size: .82rem; font-family: ui-monospace, Menlo, Consolas, monospace; max-height: 200px; overflow-y: auto; margin-top: .5rem; }
+  .cam-list .ok { color: var(--success); }
+  .cam-list .err { color: var(--danger); }
+  .cam-list .muted { color: var(--text-secondary); font-family: inherit; }
+  .cam-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: .3rem 1rem; align-items: start; }
+  .cam-form .field { margin-bottom: .9rem; }
+  .cam-set-field { display: flex; gap: .5rem; align-items: center; }
+  .cam-set-field input, .cam-set-field select { flex: 1 1 auto; }
+  .cam-set-field .pending { color: var(--warning, #e0a33a); font-size: var(--fs-xs); }
+  .cam-warn { border: 1px solid rgba(224,163,58,.35); background: var(--warning-bg); border-radius: var(--radius-sm);
+              padding: .7rem .9rem; margin-top: .8rem; font-size: var(--fs-base); }
+  .cam-picker { position: relative; display: inline-block; margin-bottom: .6rem; }
+  .cam-picker-menu { position: absolute; z-index: 20; top: calc(100% + .3rem); left: 0; min-width: 13rem;
+                     background: var(--bg-elevated, #26262a); border: 1px solid var(--border);
+                     border-radius: var(--radius-sm); padding: .4rem; max-height: 16rem; overflow-y: auto;
+                     box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+  .cam-picker-menu label { display: flex; align-items: center; gap: .45rem; padding: .3rem .4rem;
+                           font-size: var(--fs-xs); white-space: nowrap; cursor: pointer; border-radius: 4px; }
+  .cam-picker-menu label:hover { background: var(--bg-subtle); }
+  .cam-picker-menu .muted { color: var(--text-secondary); padding: .3rem .4rem; font-size: var(--fs-xs); }
+  code.cmd { display: block; white-space: pre-wrap; word-break: break-all; margin-top: .4rem;
+             padding: .5rem .7rem; background: var(--bg-subtle); border-radius: var(--radius-sm); font-size: var(--fs-xs); }
+</style>
+</head>
+<body class="page-full">
+<div class="app-shell">
+  {% set nav_mode = 'links' %}
+  {% set active_tab = 'camera' %}
+  {% include '_sidebar.html' %}
+
+  <div class="main">
+    <div class="main-head"><h1>Phantom Import</h1></div>
+    <p class="main-sub">Pulls <code>.cine</code> takes off a Phantom VEO into the download folder,
+      the way the FTP import feeds footage from other cameras. Chataigne keeps control of
+      record/stop; after each take it hands the camera to Glambot to save the clip, then takes
+      it back. Point a project's <em>footage source folder</em> at the download folder.</p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+
+    {% if not available %}
+      <div class="cam-warn">The camera bridge component isn't available in this build — settings
+        can be saved but the camera can't be reached here.</div>
+    {% endif %}
+
+    <div class="card">
+      <div class="card-title">Status</div>
+      <div class="cam-row">
+        <span class="cam-pill {{ 'on' if status.running else 'off' }}" id="camPill">
+          <span class="cam-dot"></span><span id="camPillText">{{ 'Connected' if status.running else 'Stopped' }}</span>
+        </span>
+        {% if status.running %}
+          <form method="post" action="{{ url_for('phantom_import_stop') }}">
+            <button type="submit" class="btn btn-secondary btn-sm">Stop</button>
+          </form>
+          <form method="post" action="{{ url_for('phantom_import_download_now') }}">
+            <button type="submit" class="btn btn-ghost btn-sm">Download now</button>
+          </form>
+        {% else %}
+          <form method="post" action="{{ url_for('phantom_import_start') }}">
+            <button type="submit" class="btn btn-primary btn-sm">Start</button>
+          </form>
+        {% endif %}
+        <form method="post" action="{{ url_for('phantom_import_backfill_looks') }}"
+              title="Read the camera's colour description for clips already downloaded, so they render with its own black reference, matrix and tone curve instead of the legacy approximation.">
+          <button type="submit" class="btn btn-ghost btn-sm">Backfill colour</button>
+        </form>
+        <span class="cam-badge ready" id="camRecBadge">{{ (status.record_state or 'unknown')|upper }}</span>
+        {% set auto_dl = status.auto_download if status.auto_download is defined else settings.auto_download %}
+        <span class="chip-row" id="camDlToggle" role="group" aria-label="Download mode">
+          <button type="button" class="chip {{ 'active' if auto_dl }}" data-mode="auto">Auto download</button>
+          <button type="button" class="chip {{ 'active' if not auto_dl }}" data-mode="manual">Manual download</button>
+        </span>
+      </div>
+      <p class="field-hint" style="margin:.4rem 0 0">Auto: Glambot checks the camera every <em>Poll interval</em>
+        seconds and pulls any new stored take, but only when the camera port is free — it never interrupts a
+        recording. A Chataigne <code>take-complete</code> call still triggers an immediate pull.
+        Manual: takes stay on the camera until you press <em>Download now</em>.</p>
+
+      <div class="cam-parts" id="camParts">
+        {% for p in status.partitions %}
+          <div class="cam-part {{ p.state }} {{ 'downloaded' if p.downloaded }} {{ 'skipped' if p.skipped }}">
+            <span class="n">P{{ p.n }}</span>{{ p.state }}{{ ' ✓' if p.downloaded }}{{ ' — stopped' if p.skipped }}
+          </div>
+        {% else %}
+          <div class="field-hint">No partition data yet.</div>
+        {% endfor %}
+      </div>
+
+      <div id="camSaveWrap" {{ '' if status.active_save else 'hidden' }}>
+        <p class="field-hint" style="margin:.7rem 0 0; display:flex; align-items:center; gap:.6rem">
+          <span>Saving partition
+            <span id="camSavePart">{{ status.active_save.partition if status.active_save }}</span>…
+            <span id="camSavePct">{{ status.active_save.pct if status.active_save }}</span>%</span>
+          <button type="button" class="btn btn-ghost btn-sm" id="camCancelBtn">Stop download</button>
+        </p>
+        <div class="cam-progress"><span id="camSaveBar"></span></div>
+        <p class="field-hint" style="margin:.3rem 0 0">Stopping discards the partial file and the take
+          <strong>won't download again automatically</strong> — press <em>Download now</em> to fetch it.
+          It stays on the camera until that partition is recorded over.</p>
+      </div>
+
+      {% if status.last_error %}<div class="cam-warn" id="camErr">{{ status.last_error }}</div>{% endif %}
+
+      <div class="cam-list" id="camDownloads">
+        {% for d in status.downloads %}
+          <div class="{{ 'ok' if d.ok else 'err' }}">{{ d.name }}{% if d.error %} — {{ d.error }}{% if d.partial_removed is defined and not d.partial_removed %} (partial file left on disk){% endif %}{% elif d.mb_per_s %} — {{ d.size_mb }} MB @ {{ d.mb_per_s }} MB/s{% if d.file_type %} · {{ d.file_type }}{% if d.resolution %} {{ d.resolution }}{% endif %}{% if d.bpp %} {{ d.bpp }} bits/px{% endif %}{% endif %}{% endif %}</div>
+        {% else %}
+          <div class="muted">No downloads yet.</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Quick camera settings</div>
+      <dl class="cam-kv">
+        <dt>IP address</dt><dd id="camIp">{{ status.camera.ip or '—' }}</dd>
+        <dt>Model</dt><dd id="camModel">{{ status.camera.model or '—' }}</dd>
+        <dt>Serial</dt><dd id="camSerial">{{ status.camera.serial or '—' }}</dd>
+        <dt>Firmware</dt><dd id="camFw">{{ status.camera.firmware or '—' }}</dd>
+      </dl>
+      {% if not status.running %}
+        <p class="field-hint">Connect (Start) to read and change live settings.</p>
+      {% endif %}
+      <div class="cam-picker" id="camPicker" {{ 'hidden' if not status.running }}>
+        <button type="button" class="btn btn-secondary btn-sm" id="camPickerBtn">Choose settings…</button>
+        <div class="cam-picker-menu" id="camPickerMenu" hidden></div>
+      </div>
+      <div class="cam-form-grid" id="camLiveSettings" {{ 'hidden' if not status.running }}>
+        <!-- populated from camera.json -->
+      </div>
+      <p class="field-hint">Changes apply the next time Glambot holds the camera (after a take),
+        or immediately if it's connected now. Read-only fields are shown greyed out.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Import settings</div>
+      <form method="post" action="{{ url_for('phantom_import_save') }}" class="cam-form">
+        <div class="field">
+          <label for="dest_dir">Download folder</label>
+          <div style="display:flex;gap:.6rem;flex-wrap:wrap">
+            <input type="text" id="dest_dir" name="dest_dir" value="{{ settings.dest_dir }}"
+                   style="flex:1 1 320px" placeholder="D:\GlambotAuto_Import">
+            <button type="button" class="btn btn-secondary btn-sm" id="pickFolderBtn">Choose folder…</button>
+          </div>
+          <p class="field-hint">Where downloaded <code>.cine</code> files are written. Use a fast local SSD —
+            a take is several GB and lands at roughly 540 MB/s over the 10G link.</p>
+          {% if not dest_exists %}
+            <div class="cam-warn">This folder doesn't exist yet.
+              <button type="submit" form="createDestForm" class="btn btn-secondary btn-sm">Create it</button>
+            </div>
+          {% endif %}
+        </div>
+
+        <div class="cam-form-grid">
+          <div class="field">
+            <label for="camera_ip">Camera IP</label>
+            <input type="text" id="camera_ip" name="camera_ip" value="{{ settings.camera_ip }}" placeholder="172.16.37.56">
+          </div>
+          <div class="field">
+            <label for="camera_serial">Camera serial (optional)</label>
+            <input type="text" id="camera_serial" name="camera_serial" value="{{ settings.camera_serial }}" placeholder="25628">
+            <p class="field-hint">Preferred over IP when set.</p>
+          </div>
+          <div class="field">
+            <label for="partition_count">Partition count</label>
+            <input type="number" id="partition_count" name="partition_count" value="{{ settings.partition_count }}" min="1" max="64">
+            <p class="field-hint">The partition-ring depth. Default 4 — each take records into
+              the next free partition so a download never hits a rolling one.</p>
+          </div>
+          <div class="field">
+            <label for="file_type">File type</label>
+            <select id="file_type" name="file_type">
+              {% for ft, label in [
+                   ('SVV_RAWCINE', 'SVV_RAWCINE — raw packed (fastest, what the grade expects)'),
+                   ('SVV_CINE',    'SVV_CINE — processed (much larger and slower)'),
+                   ('SVV_TIFCINE', 'SVV_TIFCINE — TIFF cine (much larger and slower)')] %}
+                <option value="{{ ft }}" {{ 'selected' if settings.file_type == ft }}>{{ label }}</option>
+              {% endfor %}
+            </select>
+            {% if settings.file_type != 'SVV_RAWCINE' %}
+              <div class="cam-warn">Downloads are set to <code>{{ settings.file_type }}</code>. The camera
+                sends a raw packed cine; every other format makes the SDK process each frame on this PC —
+                several times the bytes and the time, and the grade pipeline expects raw, so colour will be
+                wrong too. Use <code>SVV_RAWCINE</code> unless you have a specific reason not to.</div>
+            {% endif %}
+            <p class="field-hint"><code>SVV_RAWCINE</code> keeps the raw sensor data Glambot's
+              grade pipeline expects, and is a near-straight copy off the camera.</p>
+          </div>
+          <div class="field">
+            <label for="poll_seconds">Poll interval (s)</label>
+            <input type="number" id="poll_seconds" name="poll_seconds" value="{{ settings.poll_seconds }}" min="2" max="120">
+            <p class="field-hint">How often <strong>Auto download</strong> checks the camera for a new take.
+              10–30s is a good range — lower picks up takes faster but talks to the camera more.</p>
+          </div>
+          <div class="field">
+            <label for="handoff_mode">Handoff mode</label>
+            <select id="handoff_mode" name="handoff_mode">
+              <option value="notify" {{ 'selected' if settings.handoff_mode == 'notify' }}>notify (call show-control URL)</option>
+              <option value="idle" {{ 'selected' if settings.handoff_mode == 'idle' }}>idle (just grab the port)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="handoff_notify_url">Show-control notify URL</label>
+            <input type="text" id="handoff_notify_url" name="handoff_notify_url" value="{{ settings.handoff_notify_url }}"
+                   placeholder="http://127.0.0.1:42000/glambot-handoff">
+            <p class="field-hint">Glambot POSTs <code>{"action":"release"}</code> before it needs
+              the camera and <code>{"action":"resume"}</code> after.</p>
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="checkbox-label"><input type="checkbox" name="delete_after_import" {{ 'checked' if settings.delete_after_import }}> Delete the camera partition after a verified import</label>
+          <p class="field-hint">Frees the ring faster; off by default.</p>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Save settings</button>
+        {% if status.running %}<span class="field-hint" style="margin-left:.6rem">Saving reconnects.</span>{% endif %}
+      </form>
+      <form method="post" action="{{ url_for('phantom_import_create_dest') }}" id="createDestForm"></form>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Chataigne handoff setup</div>
+      <p class="field-hint">In your show file, coordinate the shared camera port (TCP 7115):</p>
+      <code class="cmd">// after you send "trig" and see "STR":
+POST {{ request.url_root }}phantom-import/take-complete   body: {"partition": &lt;n&gt;}
+
+// before each "rec", and continuously:
+GET  {{ request.url_root }}phantom-import/port-owner
+  -> {"owner":"chataigne"}  = safe to hold the Raw TCP socket / send rec/trig
+  -> {"owner":"glambot"}    = disconnect the Raw TCP module now, wait
+
+// optional: point "Show-control notify URL" above at a Chataigne OSC/HTTP
+// input that disconnects the module on "release" and reconnects on "resume".</code>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var pickBtn = document.getElementById('pickFolderBtn');
+  var destInput = document.getElementById('dest_dir');
+  if (pickBtn) {
+    pickBtn.addEventListener('click', function () {
+      var body = new FormData();
+      body.append('kind', 'folder');
+      body.append('initial', destInput.value.trim());
+      pickBtn.disabled = true;
+      fetch('{{ url_for("pick") }}', { method: 'POST', body: body })
+        .then(function (r) { return r.json(); })
+        .then(function (data) { if (data.ok && data.path) destInput.value = data.path; })
+        .catch(function () {})
+        .then(function () { pickBtn.disabled = false; });
+    });
+  }
+
+  function setText(id, val) { var el = document.getElementById(id); if (el && val != null) el.textContent = val; }
+  var settingsUrl = '{{ url_for("phantom_import_camera_settings") }}';
+  var quickUrl = '{{ url_for("phantom_import_quick_settings") }}';
+  var dlModeUrl = '{{ url_for("phantom_import_download_mode") }}';
+
+  var liveFieldNames = [];
+  var quickSettings = {{ (status.quick_settings if status.quick_settings is defined else settings.quick_settings) | tojson }};
+
+  // -- quick-settings field picker ---------------------------------
+  var picker = document.getElementById('camPicker');
+  var pickerBtn = document.getElementById('camPickerBtn');
+  var pickerMenu = document.getElementById('camPickerMenu');
+
+  function renderPickerMenu() {
+    if (!pickerMenu) return;
+    if (!liveFieldNames.length) {
+      pickerMenu.innerHTML = '<div class="muted">No live settings available yet.</div>';
+      return;
+    }
+    pickerMenu.innerHTML = liveFieldNames.map(function (name) {
+      var checked = quickSettings.indexOf(name) !== -1 ? 'checked' : '';
+      return '<label><input type="checkbox" value="' + name + '" ' + checked + '>' + name + '</label>';
+    }).join('');
+    pickerMenu.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
+      cb.addEventListener('change', saveQuickSettings);
+    });
+  }
+
+  function saveQuickSettings() {
+    var chosen = Array.prototype.map.call(
+      pickerMenu.querySelectorAll('input[type=checkbox]:checked'), function (cb) { return cb.value; });
+    quickSettings = chosen;
+    var wrap = document.getElementById('camLiveSettings');
+    if (wrap) wrap.dataset.dirty = '';
+    renderLiveSettings(lastLiveFields, lastPending);
+    fetch(quickUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ fields: chosen }) }).catch(function () {});
+  }
+
+  if (pickerBtn) {
+    pickerBtn.addEventListener('click', function () {
+      pickerMenu.hidden = !pickerMenu.hidden;
+      if (!pickerMenu.hidden) renderPickerMenu();
+    });
+    document.addEventListener('click', function (e) {
+      if (picker && !picker.contains(e.target)) pickerMenu.hidden = true;
+    });
+  }
+
+  // -- download mode toggle --------------------------------------
+  var dlToggle = document.getElementById('camDlToggle');
+  var dlDirtyUntil = 0;
+  if (dlToggle) {
+    dlToggle.querySelectorAll('[data-mode]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var auto = btn.getAttribute('data-mode') === 'auto';
+        dlToggle.querySelectorAll('[data-mode]').forEach(function (b) {
+          b.classList.toggle('active', (b.getAttribute('data-mode') === 'auto') === auto);
+        });
+        dlDirtyUntil = Date.now() + 5000;
+        fetch(dlModeUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                           body: JSON.stringify({ auto: auto }) }).catch(function () {});
+      });
+    });
+  }
+
+  function syncDlToggle(auto) {
+    if (!dlToggle || Date.now() < dlDirtyUntil) return;
+    dlToggle.querySelectorAll('[data-mode]').forEach(function (b) {
+      b.classList.toggle('active', (b.getAttribute('data-mode') === 'auto') === !!auto);
+    });
+  }
+
+  var lastLiveFields = null, lastPending = null;
+
+  function renderLiveSettings(fields, pending) {
+    lastLiveFields = fields; lastPending = pending;
+    var wrap = document.getElementById('camLiveSettings');
+    if (!wrap || !fields) return;
+    if (wrap.dataset.dirty === '1') return;   // don't stomp a field being edited
+    wrap.hidden = false;
+    var names = Object.keys(fields).filter(function (n) { return quickSettings.indexOf(n) !== -1; });
+    if (!names.length) {
+      wrap.innerHTML = '<p class="field-hint">No quick settings chosen — click “Choose settings…”.</p>';
+      return;
+    }
+    var html = '';
+    names.forEach(function (name) {
+      var f = fields[name];
+      var pend = pending && Object.prototype.hasOwnProperty.call(pending, name);
+      var disabled = f.writable ? '' : 'disabled';
+      var input;
+      if (f.choices && f.choices.length) {
+        input = '<select data-name="' + name + '" ' + disabled + '>' +
+          f.choices.map(function (c) {
+            return '<option ' + (String(c) === String(f.value) ? 'selected' : '') + '>' + c + '</option>';
+          }).join('') + '</select>';
+      } else if (f.kind === 'bool') {
+        input = '<select data-name="' + name + '" ' + disabled + '>' +
+          ['true', 'false'].map(function (c) {
+            return '<option ' + (String(!!f.value) === c ? 'selected' : '') + '>' + c + '</option>';
+          }).join('') + '</select>';
+      } else {
+        input = '<input data-name="' + name + '" value="' + (f.value == null ? '' : f.value) + '" ' + disabled + '>';
+      }
+      html += '<div class="field"><label>' + name + '</label>' +
+              '<div class="cam-set-field">' + input +
+              '<button type="button" class="btn btn-ghost btn-sm" data-apply="' + name + '" ' + disabled + '>Set</button>' +
+              '</div>' + (pend ? '<span class="pending">pending…</span>' : '') + '</div>';
+    });
+    wrap.innerHTML = html;
+    wrap.querySelectorAll('[data-name]').forEach(function (el) {
+      el.addEventListener('focus', function () { wrap.dataset.dirty = '1'; });
+    });
+    wrap.querySelectorAll('[data-apply]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var name = btn.getAttribute('data-apply');
+        var el = wrap.querySelector('[data-name="' + name + '"]');
+        var body = {}; body[name] = el.value;
+        btn.disabled = true;
+        fetch(settingsUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+          .then(function (r) { return r.json(); })
+          .then(function () { wrap.dataset.dirty = ''; })
+          .catch(function () {})
+          .then(function () { btn.disabled = false; });
+      });
+    });
+  }
+
+  function poll() {
+    fetch('{{ url_for("phantom_import_status") }}', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (!s.available) return;
+        var pill = document.getElementById('camPill');
+        pill.className = 'cam-pill ' + (s.running ? 'on' : 'off');
+        setText('camPillText', s.running ? 'Connected' : 'Stopped');
+        if (Array.isArray(s.quick_settings)) quickSettings = s.quick_settings;
+        if (typeof s.auto_download === 'boolean') syncDlToggle(s.auto_download);
+
+        // A reading Glambot couldn't refresh (show control is holding the
+        // camera port) is shown as stale rather than as current — a confident
+        // READY while the camera is actually rolling is worse than a grey one.
+        var badge = document.getElementById('camRecBadge');
+        var rs = (s.record_state || 'unknown');
+        var stale = s.running && (s.state_age_s === null || s.state_age_s > 10);
+        badge.className = 'cam-badge ' + rs + (stale ? ' stale' : '');
+        badge.textContent = rs.toUpperCase();
+        badge.title = stale
+          ? 'Last read ' + (s.state_age_s === null ? 'never' : s.state_age_s + 's ago')
+            + ' — the camera port is busy, so this may be out of date.'
+          : 'Read ' + (s.state_age_s || 0) + 's ago';
+
+        var parts = document.getElementById('camParts');
+        if (s.partitions && s.partitions.length) {
+          parts.innerHTML = s.partitions.map(function (p) {
+            var cls = p.state + (p.downloaded ? ' downloaded' : '') + (p.skipped ? ' skipped' : '');
+            var mark = p.downloaded ? ' ✓' : (p.skipped ? ' — stopped' : '');
+            return '<div class="cam-part ' + cls + '">' +
+                   '<span class="n">P' + p.n + '</span>' + p.state + mark + '</div>';
+          }).join('');
+        }
+
+        var sw = document.getElementById('camSaveWrap');
+        if (s.active_save) {
+          sw.hidden = false;
+          setText('camSavePart', s.active_save.partition);
+          setText('camSavePct', s.active_save.pct);
+          var bar = document.getElementById('camSaveBar');
+          if (bar) bar.style.width = (s.active_save.pct || 0) + '%';
+          var cb = document.getElementById('camCancelBtn');
+          if (cb) {
+            cb.disabled = !!s.active_save.cancelling;
+            cb.textContent = s.active_save.cancelling ? 'Stopping…' : 'Stop download';
+          }
+        } else { sw.hidden = true; }
+
+        var dl = document.getElementById('camDownloads');
+        if (s.downloads && s.downloads.length) {
+          dl.innerHTML = s.downloads.map(function (d) {
+            var note;
+            if (d.error) {
+              note = ' — ' + d.error;
+              if (d.partial_removed === false) { note += ' (partial file left on disk)'; }
+            } else if (d.mb_per_s) {
+              note = ' — ' + d.size_mb + ' MB @ ' + d.mb_per_s + ' MB/s';
+              if (d.file_type) {
+                note += ' · ' + d.file_type + (d.resolution ? ' ' + d.resolution : '')
+                      + (d.bpp ? ' ' + d.bpp + ' bits/px' : '');
+              }
+            } else { note = ''; }
+            return '<div class="' + (d.ok ? 'ok' : 'err') + '">' + d.name + note + '</div>';
+          }).join('');
+        }
+
+        if (s.camera) {
+          setText('camIp', s.camera.ip || '—');
+          setText('camModel', s.camera.model || '—');
+          setText('camSerial', s.camera.serial || '—');
+          setText('camFw', s.camera.firmware || '—');
+        }
+        if (s.live_settings) {
+          liveFieldNames = Object.keys(s.live_settings);
+          if (pickerMenu && !pickerMenu.hidden) renderPickerMenu();
+        }
+        var pk = document.getElementById('camPicker');
+        if (pk) pk.hidden = !s.running;
+        var lsWrap = document.getElementById('camLiveSettings');
+        if (!s.running) {
+          if (lsWrap) lsWrap.hidden = true;
+        } else {
+          renderLiveSettings(s.live_settings, s.pending_settings);
+        }
+      })
+      .catch(function () {});
+  }
+  var cancelBtn = document.getElementById('camCancelBtn');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', function () {
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = 'Stopping…';
+      fetch('{{ url_for("phantom_import_cancel_save") }}', { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .catch(function () { return {}; })
+        .then(function () { poll(); });
+    });
+  }
+
+  // The record badge is only as fresh as this interval, so poll briskly while
+  // someone is looking and not at all when they aren't.
+  var timer = null;
+  function schedule() {
+    if (timer) { clearInterval(timer); timer = null; }
+    if (document.visibilityState === 'hidden') return;
+    timer = setInterval(poll, 1000);
+    poll();
+  }
+  document.addEventListener('visibilitychange', schedule);
+  schedule();
+})();
+</script>
+</body>
+</html>
