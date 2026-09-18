@@ -1,0 +1,8 @@
+# Extra runtime dependencies for the packaged macOS app only (native window
+# + menu-bar tray icon) - NOT used by run.sh / launch.sh, so these stay out
+# of the main requirements.txt. Mirrors windows_app/launcher-requirements.txt;
+# the only difference is pywebview's "cocoa" extra, which pulls in the
+# PyObjC bindings its macOS backend needs (Windows uses EdgeChromium
+# instead, bundled with the OS, so windows_app needs no equivalent extra).
+pywebview[cocoa]==5.3.2
+pystray==0.19.5

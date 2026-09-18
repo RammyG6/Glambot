@@ -36,5 +36,11 @@ windows_app/vendor/*.exe
 windows_app/*.exe
 windows_app/glambotlogo.ico
 
+# macOS packaged app build output — same reasoning as windows_app/ above.
+mac_app/build/
+mac_app/dist/
+mac_app/vendor/ffprobe
+mac_app/glambotlogo.icns
+
 # Local backups
 *.bak

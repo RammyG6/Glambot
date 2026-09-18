@@ -1,6 +1,8 @@
 ; Inno Setup script for GlambotSetup.exe.
-; Build with: iscc installer.iss /DSourceDataDir="D:\Glambot"
-; (build_installer.bat wires this up automatically - see that file.)
+; Build with: iscc installer.iss /DSourceDataDir="D:\Glambot" /DMyAppVersion="1.10"
+; (build_installer.bat wires both of these up automatically - see that file,
+; which reads MyAppVersion from the repo-root VERSION file so Windows and
+; macOS builds can never drift to different version numbers.)
 ;
 ; NOTE: this script only ever *references* paths on the build machine. It
 ; contains no secrets itself and is safe to commit. The COMPILED
@@ -14,7 +16,12 @@
 #endif
 
 #define MyAppName "Glambot"
-#define MyAppVersion "1.0"
+; Fallback only - always overridden by build_installer.bat from the
+; repo-root VERSION file. Keep in sync manually if you ever build by
+; invoking iscc directly without a /DMyAppVersion override.
+#ifndef MyAppVersion
+  #define MyAppVersion "1.10"
+#endif
 #define MyAppPublisher "G6 Moco"
 
 [Setup]
@@ -55,15 +62,16 @@ Source: "{#SourceDataDir}\.env"; DestDir: "{code:GetDataDir}"; Flags: onlyifdoes
 Source: "{#SourceDataDir}\.env.example"; DestDir: "{code:GetDataDir}"; Flags: onlyifdoesntexist skipifsourcedoesntexist
 Source: "{#SourceDataDir}\credentials.json"; DestDir: "{code:GetDataDir}"; Flags: onlyifdoesntexist skipifsourcedoesntexist
 Source: "{#SourceDataDir}\token.json"; DestDir: "{code:GetDataDir}"; Flags: onlyifdoesntexist skipifsourcedoesntexist
-Source: "{#SourceDataDir}\overlays\*"; DestDir: "{code:GetDataDir}\overlays"; Flags: recursesubdirs createallsubdirs onlyifdoesntexist skipifsourcedoesntexist
-Source: "{#SourceDataDir}\soundtracks\*"; DestDir: "{code:GetDataDir}\soundtracks"; Flags: recursesubdirs createallsubdirs onlyifdoesntexist skipifsourcedoesntexist
-Source: "{#SourceDataDir}\backgrounds\*"; DestDir: "{code:GetDataDir}\backgrounds"; Flags: recursesubdirs createallsubdirs onlyifdoesntexist skipifsourcedoesntexist
 
 [Dirs]
 ; Deliberately empty - a general-purpose installer shouldn't silently carry
-; over this machine's specific client jobs. Copy project\ over by hand
-; afterward if you want to clone this machine's in-progress work.
+; over this machine's specific client jobs, overlays, or soundtracks. Copy
+; any of these over by hand afterward if you want to clone this machine's
+; in-progress work or asset library.
 Name: "{code:GetDataDir}\project"
+Name: "{code:GetDataDir}\overlays"
+Name: "{code:GetDataDir}\soundtracks"
+Name: "{code:GetDataDir}\backgrounds"
 
 [Icons]
 Name: "{group}\Glambot"; Filename: "{app}\Glambot.exe"
@@ -90,6 +98,7 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=
 [Code]
 var
   DataDirPage: TInputDirWizardPage;
+  EnvPreexisted: Boolean;
 
 procedure InitializeWizard;
 begin
@@ -112,8 +121,38 @@ begin
   Result := DataDirPage.Values[0];
 end;
 
+// Strips a leading INBOX_DIR=... line from the just-copied .env, so a
+// brand-new data folder falls back to glambot_launcher.py's own default
+// (data_dir\project) instead of the build machine's absolute dev path.
+// Only touches an .env this install just wrote (see EnvPreexisted below) -
+// never a data folder's own already-customized .env.
+procedure StripInboxDirFromEnv(const EnvPath: String);
+var
+  Lines: TStringList;
+  I: Integer;
+begin
+  if not FileExists(EnvPath) then
+    exit;
+  Lines := TStringList.Create;
+  try
+    Lines.LoadFromFile(EnvPath);
+    for I := Lines.Count - 1 downto 0 do
+      if Copy(Lines[I], 1, 10) = 'INBOX_DIR=' then
+        Lines.Delete(I);
+    Lines.SaveToFile(EnvPath);
+  finally
+    Lines.Free;
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
+  if CurStep = ssInstall then
+    EnvPreexisted := FileExists(GetDataDir('') + '\.env');
   if CurStep = ssPostInstall then
+  begin
     SaveStringToFile(ExpandConstant('{app}\datadir.txt'), GetDataDir(''), False);
+    if not EnvPreexisted then
+      StripInboxDirFromEnv(GetDataDir('') + '\.env');
+  end;
 end;

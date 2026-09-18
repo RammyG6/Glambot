@@ -11,6 +11,8 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$HOME/Applications/Glambot.app"
+# Single version source shared with windows_app - see VERSION's own comment.
+APP_VERSION="$(cat "$REPO_DIR/VERSION")"
 
 if ! command -v platypus >/dev/null 2>&1; then
   echo "Platypus command-line tool not found." >&2
@@ -36,7 +38,7 @@ platypus \
   -p '/bin/bash' \
   -u 'Glambot' \
   -I 'com.g6moco.glambot' \
-  -V '1.0' \
+  -V "$APP_VERSION" \
   -y \
   "$TMP_SCRIPT" \
   "$DEST"
