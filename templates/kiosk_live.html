@@ -22,7 +22,7 @@
   .clip:hover { border-color: var(--accent); }
   .clip.selected { background: color-mix(in srgb, var(--accent) 16%, var(--bg-elevated)); border-color: var(--accent); }
   .clip.selected .name { color: var(--accent); font-weight: 600; }
-  .hide-btn { position: absolute; top: .5rem; right: .5rem; width: 1.8rem; height: 1.8rem; line-height: 1.8rem; padding: 0; border: 1px solid var(--border); border-radius: 50%; background: var(--bg-elevated); color: var(--text-secondary); font-size: 1rem; cursor: pointer; }
+  .hide-btn { position: absolute; top: .35rem; right: .35rem; width: 2.75rem; height: 2.75rem; line-height: 2.75rem; padding: 0; border: 1px solid var(--border); border-radius: 50%; background: var(--bg-elevated); color: var(--text-secondary); font-size: 1.3rem; cursor: pointer; }
   .hide-btn:hover { background: var(--bg); color: var(--text); border-color: var(--accent); }
   .hidden-link { display: block; text-align: center; margin: -1.2rem 0 2rem; }
   .play-col .back-live { display: block; width: 100%; margin-top: .8rem; }
@@ -76,7 +76,7 @@
           </div>
         {% endfor %}
       </div>
-      <button type="button" id="loadMore" class="btn btn-secondary"
+      <button type="button" id="loadMore" class="btn btn-lg btn-secondary"
               style="display:{{ 'block' if has_more else 'none' }};margin:1.2rem auto 0">
         Load more clips
       </button>
@@ -87,7 +87,7 @@
       <video id="player" autoplay muted loop playsinline
              {% if latest_id %}src="{{ url_for('video', job_id=latest_id) }}"{% endif %}></video>
       <div class="now-playing" id="nowPlaying">{% if items %}{{ items[0].job.filename }}{% endif %}</div>
-      <button type="button" class="btn btn-secondary back-live" id="backLive" style="display:none">
+      <button type="button" class="btn btn-lg btn-secondary back-live" id="backLive" style="display:none">
         &#9654; Back to live (newest clip)
       </button>
     </div>

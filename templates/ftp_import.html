@@ -7,8 +7,9 @@
 <style>
   .ftp-status-row { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
   .ftp-status-row form { margin: 0; }
+  .ftp-status-row .btn { margin-top: 0; } /* undo the global form>.btn top margin so the button lines up with the pill */
   .ftp-pill { display: inline-flex; align-items: center; gap: .4rem; font-weight: 600;
-              font-size: var(--fs-xs); padding: .28rem .75rem; border-radius: var(--radius-pill);
+              font-size: var(--fs-xs); padding: .4rem .8rem; border-radius: var(--radius-pill);
               border: 1px solid var(--border); white-space: nowrap; }
   .ftp-pill.on  { color: var(--success); border-color: rgba(48,209,88,.35); background: var(--success-bg); }
   .ftp-pill.off { color: var(--text-secondary); }
@@ -37,15 +38,10 @@
   .ftp-warn .btn { margin-top: .5rem; }
   code.cmd { display: block; white-space: pre-wrap; word-break: break-all; margin-top: .4rem;
              padding: .5rem .7rem; background: var(--bg-subtle); border-radius: var(--radius-sm); font-size: var(--fs-xs); }
-  .ftp-modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex;
-                        align-items: center; justify-content: center; z-index: 50; padding: 1.5rem; }
-  .ftp-modal-backdrop[hidden] { display: none !important; }
+  .modal-backdrop[hidden] { display: none !important; }
   .ftp-warn[hidden] { display: none !important; }
-  .ftp-modal { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-lg); max-width: 440px;
-               width: 100%; padding: 1.5rem 1.6rem; box-shadow: var(--shadow); }
-  .ftp-modal h2 { margin: 0 0 .75rem; font-size: var(--fs-lg); color: var(--text); }
-  .ftp-modal p { font-size: var(--fs-base); color: var(--text-secondary); }
-  .ftp-modal-actions { display: flex; gap: .6rem; justify-content: flex-end; margin-top: 1rem; }
+  .modal-card p { font-size: var(--fs-base); color: var(--text-secondary); }
+  .modal-actions { display: flex; gap: .75rem; justify-content: flex-end; margin-top: 1rem; }
 </style>
 </head>
 <body class="page-full">
@@ -216,13 +212,13 @@
   </div>
 </div>
 
-<div id="ftpFwModal" class="ftp-modal-backdrop" {{ '' if (status.running and status.firewall_state not in ('ok', 'unsupported')) else 'hidden' }}>
-  <div class="ftp-modal">
+<div id="ftpFwModal" class="modal-backdrop" {{ '' if (status.running and status.firewall_state not in ('ok', 'unsupported')) else 'hidden' }}>
+  <div class="modal-card">
     <h2>Allow camera connections through Windows Firewall?</h2>
     <p>The FTP server is running but Windows Firewall isn't allowing inbound
       connections on its ports yet, so a camera on the network can't reach it.
       Glambot can add the rule — Windows will ask you to confirm once.</p>
-    <div class="ftp-modal-actions">
+    <div class="modal-actions">
       <button type="button" class="btn btn-ghost btn-sm" id="ftpFwDismiss">Not now</button>
       <form method="post" action="{{ url_for('ftp_import_firewall_apply') }}">
         <button type="submit" class="btn btn-primary btn-sm">Adjust now</button>

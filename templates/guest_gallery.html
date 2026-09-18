@@ -22,7 +22,7 @@
   {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
   <form method="post" action="{{ url_for('guest.gallery', project=project) }}">
     <input class="pin-input" type="password" name="pin" inputmode="numeric" autocomplete="off" autofocus required>
-    <button type="submit" class="btn btn-primary btn-block" style="margin-top:1rem">Unlock</button>
+    <button type="submit" class="btn btn-primary btn-lg btn-block" style="margin-top:1rem">Unlock</button>
   </form>
 {% else %}
   <h1>Event videos</h1>

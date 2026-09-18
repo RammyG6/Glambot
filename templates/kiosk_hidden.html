@@ -31,8 +31,8 @@
         <img class="thumb" src="{{ url_for('thumbnail', job_id=item.job.id) }}" alt="Clip"
              onerror="this.style.display='none'">
         <div class="name">{{ item.job.filename }}</div>
-        <button type="button" class="btn btn-secondary unhide-btn" data-unhide-id="{{ item.job.id }}">Unhide</button>
-        <button type="button" class="btn btn-danger-ghost delete-btn" data-delete-id="{{ item.job.id }}">Delete permanently</button>
+        <button type="button" class="btn btn-lg btn-secondary unhide-btn" data-unhide-id="{{ item.job.id }}">Unhide</button>
+        <button type="button" class="btn btn-lg btn-danger-ghost delete-btn" data-delete-id="{{ item.job.id }}">Delete permanently</button>
       </div>
     {% endfor %}
   </div>

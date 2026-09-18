@@ -7,13 +7,14 @@
 <style>
   .cam-row { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
   .cam-row form { margin: 0; }
+  .cam-row .btn { margin-top: 0; } /* undo the global form>.btn top margin so buttons line up with the pill/badge */
   .cam-pill { display: inline-flex; align-items: center; gap: .4rem; font-weight: 600;
-              font-size: var(--fs-xs); padding: .28rem .75rem; border-radius: var(--radius-pill);
+              font-size: var(--fs-xs); padding: .4rem .8rem; border-radius: var(--radius-pill);
               border: 1px solid var(--border); white-space: nowrap; }
   .cam-pill.on  { color: var(--success); border-color: rgba(48,209,88,.35); background: var(--success-bg); }
   .cam-pill.off { color: var(--text-secondary); }
   .cam-dot { width: .55rem; height: .55rem; border-radius: 50%; background: currentColor; }
-  .cam-badge { font-weight: 700; font-size: var(--fs-lg); padding: .3rem .9rem; border-radius: var(--radius-sm);
+  .cam-badge { font-weight: 700; font-size: var(--fs-xs); padding: .4rem .8rem; border-radius: var(--radius-sm);
                border: 1px solid var(--border); letter-spacing: .04em; }
   .cam-badge.recording { color: var(--danger); border-color: rgba(255,69,58,.4); background: var(--danger-bg); }
   .cam-badge.stored    { color: var(--success); border-color: rgba(48,209,88,.35); background: var(--success-bg); }
