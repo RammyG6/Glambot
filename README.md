@@ -648,6 +648,28 @@ server cleanly. It still reads the same `.env` / `credentials.json` /
 `./run.sh` carries over unchanged. Re-run `./mac_app/build_app.sh` any time
 you pull code changes, to rebuild the app with the latest version.
 
+### A fully packaged, no-Terminal `.app` (native window + tray icon)
+
+The double-click app above still needs Python/`pip` on the machine and runs
+in a browser tab. For a handoff-ready build that needs neither — a real
+native window with a menu-bar icon, matching what the Windows installer
+gives Windows operators — use the packaged tier instead:
+
+```bash
+./mac_app/build_packaged_app.sh
+```
+
+This produces `mac_app/dist/Glambot.app`: a standalone bundle (PyInstaller)
+with Python, all dependencies, and ffmpeg/ffprobe built in, opening in its
+own window with a menu-bar icon (Open Glambot / View logs / Quit) instead of
+a browser tab. Same unsigned-app Gatekeeper caveat as above (right-click →
+Open on first launch). The Phantom VEO camera-import feature isn't included
+in this build — it depends on a Windows-only SDK with no macOS equivalent,
+so it stays permanently unavailable here; every other feature works
+normally. Both this and the Windows installer are built from the same
+`VERSION` file and the same shared app code, so they're always released in
+lockstep at the same version number.
+
 ## Migrating to another machine
 
 The code lives on GitHub (`git remote -v` shows `origin`); to set Glambot up

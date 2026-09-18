@@ -1,0 +1,282 @@
+"""Shared entry point for the packaged desktop app (Windows + macOS).
+
+Replaces `python -m glambot.pipeline` + a browser tab with: a native window
+(pywebview) showing the same Flask app, a system tray icon (since there's no
+console window to show logs in or Ctrl+C to quit from), and file-based
+logging. Not used by `run.sh` / `Glambot.bat` / `mac_app/launch.sh` - those
+keep running the plain CLI entry point (`glambot/pipeline.py`) unchanged.
+
+`windows_app/glambot_launcher.py` and `mac_app/glambot_launcher.py` are thin
+per-OS entry points that just call `main()` here - this module holds the
+~95% of launcher logic that's already platform-agnostic, with the handful of
+genuinely OS-specific bits (native error dialog, "open logs", the webview
+backend, and where the data folder defaults to) branched on `sys.platform`
+inline below.
+
+Reads the data folder (where .env / credentials.json / project/ / overlays/
+etc. live, separate from wherever the packaged app itself is installed) from
+`datadir.txt`, written next to the app's executable by the Windows installer
+(Inno Setup). macOS has no installer wizard yet, so when `datadir.txt` is
+absent there, it falls back to the standard per-user macOS app-data location
+instead of treating that as a fatal error.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
+    else Path(__file__).resolve().parent
+
+
+def _fatal(message: str) -> None:
+    """Show a native message box - there's no console window to print to in
+    the packaged (windowed) build - then exit."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, message, "Glambot", 0x10)  # MB_ICONERROR
+        elif sys.platform == "darwin":
+            escaped = message.replace("\\", "\\\\").replace('"', '\\"')
+            subprocess.run(
+                ["osascript", "-e", f'display alert "Glambot" message "{escaped}" as critical'],
+                capture_output=True, timeout=30,
+            )
+    except Exception:
+        pass
+    sys.exit(1)
+
+
+def _open_path(path: Path) -> None:
+    """Open a file/folder in the OS's default viewer - used by the tray's
+    "View logs" action."""
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(path))  # noqa: S606 - local file, not user input
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(path)])
+        else:
+            subprocess.run(["xdg-open", str(path)])
+    except Exception:
+        logging.exception("Failed to open %s", path)
+
+
+def _resolve_data_dir() -> Path:
+    marker = APP_DIR / "datadir.txt"
+    if marker.exists():
+        data_dir = Path(marker.read_text(encoding="utf-8").strip())
+    elif sys.platform == "darwin":
+        # No installer wizard on Mac (yet) - default to the standard
+        # per-user macOS app-data location, created on first run.
+        data_dir = Path.home() / "Library" / "Application Support" / "Glambot"
+        data_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        _fatal(
+            "Glambot can't find datadir.txt next to its own .exe - this "
+            "install looks corrupted. Try reinstalling Glambot."
+        )
+        raise SystemExit(1)  # unreachable - _fatal() exits, satisfies type checkers
+
+    if not data_dir.is_dir():
+        _fatal(
+            f"Glambot's data folder is missing:\n{data_dir}\n\n"
+            "Check it wasn't moved or deleted, or reinstall Glambot."
+        )
+    return data_dir
+
+
+def _setup_logging(data_dir: Path) -> Path:
+    """Route all output to a file - in a windowed PyInstaller build,
+    sys.stdout/sys.stderr are None, which crashes anything that assumes they
+    exist, and there's no console to read logs from even if it didn't."""
+    log_path = data_dir / "glambot.log"
+    log_file = open(log_path, "a", encoding="utf-8", buffering=1)
+    sys.stdout = log_file
+    sys.stderr = log_file
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        stream=log_file,
+        force=True,
+    )
+    logging.info("Glambot starting (data dir: %s)", data_dir)
+    return log_path
+
+
+def main() -> None:
+    if not getattr(sys, "frozen", False):
+        # Dev-mode convenience: running this file directly from a checkout
+        # needs the repo root on sys.path to find the `glambot` package (a
+        # frozen build gets this from PyInstaller's Analysis instead).
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+    data_dir = _resolve_data_dir()
+    log_path = _setup_logging(data_dir)
+    os.chdir(data_dir)
+
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    if not (data_dir / ".env").exists():
+        _fatal(
+            f".env not found in the data folder:\n{data_dir}\n\n"
+            "Copy .env.example to .env and fill in your settings, then "
+            "restart Glambot."
+        )
+
+    from glambot.app import create_app
+    from glambot.db import JobStore
+    from glambot.ftp_import import FtpImportServer, load_ftp_settings
+    from glambot.phantom_import import PhantomImportServer, load_phantom_settings
+    from glambot.watcher import InboxWatcher
+
+    inbox_dir = Path(os.environ.get("INBOX_DIR", str(data_dir / "project"))).resolve()
+    host = os.environ.get("HOST", "127.0.0.1")
+    # BIND_HOST is the listening socket; the window and readiness probe always
+    # use loopback (connecting to 0.0.0.0 is unreliable on Windows). Set
+    # BIND_HOST=0.0.0.0 in .env to also serve guests / iPads over the LAN.
+    bind_host = os.environ.get("BIND_HOST", host)
+    port = int(os.environ.get("PORT", "5000"))
+
+    if bind_host not in {"127.0.0.1", "::1", "localhost"} and not os.environ.get("GLAMBOT_PIN", "").strip():
+        logging.warning(
+            "Glambot is binding to %s with no GLAMBOT_PIN set - the operator dashboard is "
+            "reachable by anyone on the LAN. Set GLAMBOT_PIN in .env.", bind_host,
+        )
+
+    store = JobStore(inbox_dir / ".glambot" / "jobs.sqlite")
+    watcher = InboxWatcher(inbox_dir, store)
+    watcher.start()
+
+    ftp_server = FtpImportServer(inbox_dir, watcher)
+    if load_ftp_settings(inbox_dir).get("enabled"):
+        err = ftp_server.start()
+        if err:
+            logging.warning("FTP import server not started: %s", err)
+
+    phantom_server = PhantomImportServer(inbox_dir, watcher)
+    if load_phantom_settings(inbox_dir).get("enabled"):
+        err = phantom_server.start()
+        if err:
+            logging.warning("Phantom import not started: %s", err)
+
+    app = create_app(inbox_dir, store, watcher, ftp_server, phantom_server)
+
+    server_thread = threading.Thread(
+        target=lambda: app.run(host=bind_host, port=port, debug=False, use_reloader=False),
+        daemon=True,
+    )
+    server_thread.start()
+
+    url = f"http://127.0.0.1:{port}/"
+    import urllib.request
+    ready = False
+    for _ in range(60):
+        try:
+            urllib.request.urlopen(url, timeout=1)
+            ready = True
+            break
+        except Exception:
+            time.sleep(0.5)
+    if not ready:
+        _fatal(
+            f"Glambot's server never became ready at {url}.\n\n"
+            f"Check the log for details:\n{log_path}"
+        )
+
+    _run_gui(url, watcher, log_path, ftp_server, phantom_server)
+
+
+def _run_gui(url: str, watcher, log_path: Path, ftp_server=None, phantom_server=None) -> None:
+    import webview
+    import pystray
+    from PIL import Image
+
+    window = webview.create_window("Glambot", url, width=1400, height=900)
+
+    # Let the Flask "/pick" route raise native file dialogs on this window.
+    from glambot import nativeui
+    nativeui.register_webview_window(window)
+
+    _shutting_down = threading.Event()
+
+    def shutdown() -> None:
+        if _shutting_down.is_set():
+            return
+        _shutting_down.set()
+        logging.info("Glambot shutting down")
+        try:
+            from glambot.processor import stop_all_active
+            stop_all_active()
+        except Exception:
+            logging.exception("Error stopping active renders")
+        try:
+            watcher.stop()
+        except Exception:
+            logging.exception("Error stopping watcher")
+        try:
+            if ftp_server is not None:
+                ftp_server.stop()
+        except Exception:
+            logging.exception("Error stopping FTP import server")
+        try:
+            if phantom_server is not None:
+                phantom_server.stop()
+        except Exception:
+            logging.exception("Error stopping Phantom import")
+        try:
+            tray_icon.stop()
+        except Exception:
+            pass
+        os._exit(0)
+
+    def on_closing():
+        shutdown()
+
+    window.events.closing += on_closing
+
+    def _open_logs(icon=None, item=None):
+        _open_path(log_path)
+
+    def _show_window(icon=None, item=None):
+        try:
+            window.show()
+        except Exception:
+            pass
+
+    def _quit(icon=None, item=None):
+        shutdown()
+
+    icon_path = APP_DIR / "logo" / "glambotlogo.png"
+    tray_image = Image.open(icon_path) if icon_path.exists() else Image.new("RGB", (16, 16), "black")
+    tray_icon = pystray.Icon(
+        "Glambot",
+        tray_image,
+        "Glambot",
+        menu=pystray.Menu(
+            pystray.MenuItem("Open Glambot", _show_window, default=True),
+            pystray.MenuItem("View logs", _open_logs),
+            pystray.MenuItem("Quit", _quit),
+        ),
+    )
+    threading.Thread(target=tray_icon.run, daemon=True).start()
+
+    # pywebview auto-selects the right backend (Cocoa/WebKit) on macOS and
+    # Linux on its own; only Windows needs to be pinned to EdgeChromium
+    # (its other Windows backends - MSHTML/QT - are legacy fallbacks we
+    # don't want it guessing between).
+    webview_kwargs = {"gui": "edgechromium"} if sys.platform == "win32" else {}
+    webview.start(**webview_kwargs)
+    # webview.start() only returns if the window closes without going
+    # through on_closing (shouldn't normally happen) - fall back to the same
+    # clean shutdown rather than leaving the tray icon/watcher/server alive.
+    shutdown()
+
+
+if __name__ == "__main__":
+    main()

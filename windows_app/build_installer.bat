@@ -15,6 +15,10 @@ rem .env itself - never commit it, upload it, or share it casually.
 cd /d "%~dp0\.."
 set "REPO_ROOT=%CD%"
 
+rem Single version source shared with mac_app - see VERSION's own comment
+rem and windows_app\installer.iss's header.
+set /p APP_VERSION=<"%REPO_ROOT%\VERSION"
+
 if not exist "%REPO_ROOT%\.venv\Scripts\python.exe" (
     echo Run Glambot.bat once first to create the virtualenv.
     pause
@@ -80,7 +84,7 @@ if errorlevel 1 (
 )
 
 echo Running Inno Setup...
-iscc "%REPO_ROOT%\windows_app\installer.iss" "/DSourceDataDir=%REPO_ROOT%"
+iscc "%REPO_ROOT%\windows_app\installer.iss" "/DSourceDataDir=%REPO_ROOT%" "/DMyAppVersion=%APP_VERSION%"
 if errorlevel 1 (
     echo Inno Setup build failed.
     pause
